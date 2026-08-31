@@ -8,4 +8,23 @@ export default defineConfig({
     react(),
     babel({ presets: [reactCompilerPreset()] })
   ],
+  server: {
+    proxy: {
+      '/api/mappls-search': {
+        target: 'https://search.mappls.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/mappls-search/, ''),
+      },
+      '/api/mappls-route': {
+        target: 'https://route.mappls.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/mappls-route/, ''),
+      },
+      '/api/mappls-token': {
+        target: 'https://outpost.mappls.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/mappls-token/, '/api/security/oauth/token'),
+      },
+    },
+  },
 })
