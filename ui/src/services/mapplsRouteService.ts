@@ -25,7 +25,7 @@ export interface RouteResult {
   duration: number; // seconds
   summary: string;
   polyline: string;
-  coordinates: [number, number][]; // [lat, lng]
+  coordinates: { lat: number; lng: number }[];
   steps: RouteStep[];
 }
 
@@ -177,7 +177,7 @@ export async function fetchAutosuggest(
       suggestCache.set(cacheKey, fallbackList);
       return fallbackList;
     }
-  } catch {}
+  } catch { }
 
   return [];
 }
@@ -217,7 +217,7 @@ export async function geocodePlace(
       geocodeCache.set(cacheKey, point);
       return point;
     }
-  } catch {}
+  } catch { }
 
   // 2. High-precision Nominatim Geocode Fallback (always resolves any place in India/world)
   try {
@@ -233,63 +233,99 @@ export async function geocodePlace(
       geocodeCache.set(cacheKey, point);
       return point;
     }
-  } catch {}
+  } catch { }
 
   return null;
 }
 
-// Fetch turn-by-turn driving directions
+// Fetch turn-by-turn driving directions from Go Backend Proxy
 export async function fetchRouteDirections(
   origin: { lat: number; lng: number },
   destination: { lat: number; lng: number },
-  profile: 'driving' | 'biking' | 'walking' = 'driving',
-  token: string
+  profile: 'driving' | 'biking' | 'walking' = 'driving'
 ): Promise<RouteResult> {
-  const originStr = `${origin.lng},${origin.lat}`;
-  const destStr = `${destination.lng},${destination.lat}`;
+  const waypoints = `${origin.lng},${origin.lat};${destination.lng},${destination.lat}`;
 
   const queryParams = new URLSearchParams({
-    access_token: token,
-    overview: 'full',
-    steps: 'true',
+    waypoints: waypoints,
+    profile: profile
   });
 
-  const path = `/route/direction/route_adv/${profile}/${originStr};${destStr}?${queryParams.toString()}`;
+  const path = `/api/v1/route?${queryParams.toString()}`;
 
-  let res: Response;
-  try {
-    res = await fetch(`/api/mappls-route${path}`);
-    if (!res.ok) throw new Error(`Route error ${res.status}`);
-  } catch {
-    res = await fetch(`https://route.mappls.com${path}`);
+  const res = await fetch(path);
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Route error ${res.status}: ${errorText}`);
   }
 
   const data = await res.json();
-  if (!data.routes || data.routes.length === 0) {
-    throw new Error(data.message || 'No route found between selected locations.');
+  if (!data || !data.coordinates || data.coordinates.length === 0) {
+    throw new Error('No route found between selected locations.');
   }
 
-  const primaryRoute = data.routes[0];
-  const leg = primaryRoute.legs?.[0] || {};
-  const polylineStr = primaryRoute.geometry || '';
-  const decodedCoords = decodePolyline(polylineStr);
+  return data as RouteResult;
+}
+export async function fetchSafeRoute(
+  origin: { lat: number; lng: number },
+  destination: { lat: number; lng: number },
+  profile: 'driving' | 'biking' | 'walking' = 'driving'
+): Promise<any> {
+  const waypoints = `${origin.lng},${origin.lat};${destination.lng},${destination.lat}`;
+  const queryParams = new URLSearchParams({ waypoints, profile });
+  const path = `/api/v1/safe-route?${queryParams.toString()}`;
 
-  const steps: RouteStep[] = (leg.steps || []).map((step: any) => ({
-    name: step.name || 'Unnamed road',
-    distance: step.distance || 0,
-    duration: step.duration || 0,
-    instruction:
-      step.maneuver?.instruction ||
-      `${step.maneuver?.type || 'proceed'} ${step.maneuver?.modifier || ''}`.trim(),
-    maneuver: step.maneuver,
-  }));
+  const res = await fetch(path);
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Route error ${res.status}: ${errorText}`);
+  }
+  const data = await res.json();
+  return data;
+}
 
-  return {
-    distance: primaryRoute.distance || leg.distance || 0,
-    duration: primaryRoute.duration || leg.duration || 0,
-    summary: leg.summary || 'Fastest Route',
-    polyline: polylineStr,
-    coordinates: decodedCoords,
-    steps,
+export async function fetchActiveHazards(): Promise<any[]> {
+  const res = await fetch('/api/v1/hazards');
+  if (!res.ok) {
+    console.error('Failed to fetch hazards');
+    return [];
+  }
+  return await res.json();
+}
+
+export async function fetchPOCOSMRoute(
+  origin: { lat: number; lng: number },
+  destination: { lat: number; lng: number }
+): Promise<any> {
+  const waypoints = `${origin.lng},${origin.lat};${destination.lng},${destination.lat}`;
+  const queryParams = new URLSearchParams({ waypoints });
+  const res = await fetch(`/api/v1/poc/osm-route?${queryParams.toString()}`);
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`POC OSM Route error ${res.status}: ${errorText}`);
+  }
+  return await res.json();
+}
+
+export interface SystemStatus {
+  state: 'checking_cache' | 'downloading' | 'building_graph' | 'saving_cache' | 'loading_graph' | 'ready' | 'error';
+  message: string;
+  percent: number;
+  metadata?: {
+    version: string;
+    build_timestamp: string;
+    nodes_total: number;
+    edges_total: number;
+    covered_states: string[];
   };
+}
+
+export async function fetchSystemStatus(): Promise<SystemStatus | null> {
+  try {
+    const res = await fetch('/api/v1/system/status');
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
 }

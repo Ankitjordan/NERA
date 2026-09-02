@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -42,22 +43,20 @@ func TestRunEngine(t *testing.T) {
 		ServiceName: "TestEngine",
 		Environment: "testing",
 		Version:     "0.0.1-test",
+		Port:        "8081",
 	}
 
-	ctx := context.Background()
-	err := RunEngine(ctx, testLogger, cfg)
-	if err != nil {
-		t.Fatalf("RunEngine returned unexpected error: %v", err)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_ = RunEngine(ctx, testLogger, cfg)
 
 	output := buf.String()
 	expectedSubstrings := []string{
 		"Starting Routing Engine service",
 		"TestEngine",
 		"testing",
-		"Routing table initialized successfully",
-		"Operating in standalone development mode",
-		"Routing Engine is ready and running",
+		"Routing Engine HTTP server is running",
 	}
 
 	for _, substr := range expectedSubstrings {

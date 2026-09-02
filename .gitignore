@@ -31,3 +31,19 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+
+# Map data & binary caches
+*.pbf
+*.gob
+*.jar
+jdk/
+ner_pbf/
+tmp_build
+*.json.bak
+test_results.txt
+test_routes_main.go.bak
+resp.json
+response.json
+safe_response.json
+test_safe_route.json
+

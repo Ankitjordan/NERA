@@ -1,0 +1,6 @@
+[out:xml][timeout:300];
+(
+  way["highway"](25.5,91.5,26.2,92.0);
+  node(w);
+);
+out body;

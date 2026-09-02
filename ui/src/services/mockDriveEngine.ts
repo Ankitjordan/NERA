@@ -23,7 +23,7 @@ export interface MockDriveState {
 export type MockDriveCallback = (state: MockDriveState) => void;
 
 export class MockDriveEngine {
-  private coords: [number, number][];  // [lat, lng][]
+  private coords: any[];
   private segDistances: number[];      // metres per segment
   private totalDistanceM: number;
   private speedKmh: number;
@@ -34,8 +34,12 @@ export class MockDriveEngine {
   private finished: boolean;
   private onUpdate: MockDriveCallback;
 
-  constructor(coordinates: [number, number][], speedKmh: number, onUpdate: MockDriveCallback) {
-    this.coords = coordinates;
+  constructor(
+    coords: any[],
+    speedKmh: number,
+    onUpdate: MockDriveCallback
+  ) {
+    this.coords = coords;
     this.speedKmh = speedKmh;
     this.onUpdate = onUpdate;
     this.distanceCoveredM = 0;
@@ -47,11 +51,13 @@ export class MockDriveEngine {
     // Pre-compute segment distances using Haversine
     this.segDistances = [];
     this.totalDistanceM = 0;
-    for (let i = 0; i < coordinates.length - 1; i++) {
-      const d = haversineMeters(
-        coordinates[i][0], coordinates[i][1],
-        coordinates[i + 1][0], coordinates[i + 1][1]
-      );
+    for (let i = 0; i < this.coords.length - 1; i++) {
+      const c1Lat = this.coords[i].lat !== undefined ? this.coords[i].lat : this.coords[i][0];
+      const c1Lng = this.coords[i].lng !== undefined ? this.coords[i].lng : this.coords[i][1];
+      const c2Lat = this.coords[i + 1].lat !== undefined ? this.coords[i + 1].lat : this.coords[i + 1][0];
+      const c2Lng = this.coords[i + 1].lng !== undefined ? this.coords[i + 1].lng : this.coords[i + 1][1];
+      
+      const d = haversineMeters(c1Lat, c1Lng, c2Lat, c2Lng);
       this.segDistances.push(d);
       this.totalDistanceM += d;
     }
@@ -120,10 +126,14 @@ export class MockDriveEngine {
       // Arrived at destination
       const last = this.coords[this.coords.length - 1];
       const prev = this.coords[this.coords.length - 2] || last;
+      const lastLat = last.lat !== undefined ? last.lat : last[0];
+      const lastLng = last.lng !== undefined ? last.lng : last[1];
+      const prevLat = prev.lat !== undefined ? prev.lat : prev[0];
+      const prevLng = prev.lng !== undefined ? prev.lng : prev[1];
       this.onUpdate({
-        lat: last[0],
-        lng: last[1],
-        bearing: calculateBearing(prev[0], prev[1], last[0], last[1]),
+        lat: lastLat,
+        lng: lastLng,
+        bearing: calculateBearing(prevLat, prevLng, lastLat, lastLng),
         speedKmh: this.speedKmh,
         distanceCoveredM: this.totalDistanceM,
         totalDistanceM: this.totalDistanceM,
@@ -151,13 +161,20 @@ export class MockDriveEngine {
 
     const p1 = this.coords[segIdx];
     const p2 = this.coords[Math.min(segIdx + 1, this.coords.length - 1)];
+    const p1Lat = p1.lat !== undefined ? p1.lat : p1[0];
+    const p1Lng = p1.lng !== undefined ? p1.lng : p1[1];
+    const p2Lat = p2.lat !== undefined ? p2.lat : p2[0];
+    const p2Lng = p2.lng !== undefined ? p2.lng : p2[1];
 
-    const lat = p1[0] + (p2[0] - p1[0]) * t;
-    const lng = p1[1] + (p2[1] - p1[1]) * t;
+    const lat = p1Lat + (p2Lat - p1Lat) * t;
+    const lng = p1Lng + (p2Lng - p1Lng) * t;
 
     // Forward bearing: look ahead a few segments for smoother heading
     const lookAheadIdx = Math.min(segIdx + 3, this.coords.length - 1);
-    const bearing = calculateBearing(lat, lng, this.coords[lookAheadIdx][0], this.coords[lookAheadIdx][1]);
+    const lookAheadPt = this.coords[lookAheadIdx];
+    const lookAheadLat = lookAheadPt.lat !== undefined ? lookAheadPt.lat : lookAheadPt[0];
+    const lookAheadLng = lookAheadPt.lng !== undefined ? lookAheadPt.lng : lookAheadPt[1];
+    const bearing = calculateBearing(lat, lng, lookAheadLat, lookAheadLng);
 
     this.onUpdate({
       lat,

@@ -10,6 +10,10 @@ export default defineConfig({
   ],
   server: {
     proxy: {
+      '/api/v1': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
       '/api/mappls-search': {
         target: 'https://search.mappls.com',
         changeOrigin: true,

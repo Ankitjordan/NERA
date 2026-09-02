@@ -36,12 +36,25 @@ const USER_GPS_MARKER_HTML = `
   <div style="position:absolute;top:5px;left:5px;width:12px;height:12px;border-radius:50%;background:#3b82f6;border:2.5px solid #fff;box-shadow:0 0 6px rgba(59,130,246,0.7);"></div>
 </div>`;
 
+export interface HazardZoneDisplay {
+  id: string;
+  center: { lat: number; lng: number };
+  radius_km: number;
+  risk_class: 'SAFE' | 'CAUTION' | 'AVOID';
+  name: string;
+  severity: string;
+  reasons: string[];
+}
+
 interface NavigationMapProps {
   token: string;
   theme: 'dark' | 'light';
   origin: LocationPoint | null;
   destination: LocationPoint | null;
   route: RouteResult | null;
+  customRouteCoords?: { lat: number; lng: number }[]; // Dummy scenic route
+  safeRouteCoords?: { lat: number; lng: number }[]; // AI Safe Route (orange)
+  hazardZones?: HazardZoneDisplay[]; // Hazard circles on map
   isJourneyActive: boolean;
   viewMode: '3d' | '2d' | 'overview';
   userGpsPosition: [number, number] | null;
@@ -57,6 +70,9 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
   origin,
   destination,
   route,
+  customRouteCoords,
+  safeRouteCoords,
+  hazardZones,
   isJourneyActive,
   viewMode,
   userGpsPosition,
@@ -72,6 +88,11 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
   const userGpsMarkerRef = useRef<any>(null);
   const polylineCasingRef = useRef<any>(null);
   const polylineLayerRef = useRef<any>(null);
+  const customPolylineCasingRef = useRef<any>(null);
+  const customPolylineLayerRef = useRef<any>(null);
+  const safePolylineCasingRef = useRef<any>(null);
+  const safePolylineLayerRef = useRef<any>(null);
+  const hazardCirclesRef = useRef<any[]>([]);
   const [mapPitch, setMapPitch] = useState(0);
   const [isDraggingCompass, setIsDraggingCompass] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -115,13 +136,25 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     ref.current = null;
   }, []);
 
+  const removeHazardCircles = useCallback(() => {
+    for (const circle of hazardCirclesRef.current) {
+      try { if (circle?.remove) circle.remove(); } catch { }
+    }
+    hazardCirclesRef.current = [];
+  }, []);
+
   const clearMapOverlays = useCallback(() => {
     removeLayer(originMarkerRef);
     removeLayer(destMarkerRef);
     removeLayer(userGpsMarkerRef);
     removeLayer(polylineCasingRef);
     removeLayer(polylineLayerRef);
-  }, [removeLayer]);
+    removeLayer(customPolylineCasingRef);
+    removeLayer(customPolylineLayerRef);
+    removeLayer(safePolylineCasingRef);
+    removeLayer(safePolylineLayerRef);
+    removeHazardCircles();
+  }, [removeLayer, removeHazardCircles]);
 
   // Init Map
   const initMap = useCallback(() => {
@@ -225,42 +258,142 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     removeLayer(polylineLayerRef);
     if (route?.coordinates?.length && window.mappls.Polyline) {
       try {
-        const pts = route.coordinates.map(([lat, lng]) => ({ lat, lng }));
+        const pts = route.coordinates; // Already in {lat, lng} format
 
-        // 1. Bold outer casing (darker navy border for crisp edge definition)
-        const casingColor = theme === 'dark' ? '#03172e' : '#103768';
+        // 1. Bold outer casing (dark green casing)
+        const casingColor = theme === 'dark' ? '#022c22' : '#064e3b';
         polylineCasingRef.current = new window.mappls.Polyline({
           map: mapInstanceRef.current,
           path: pts,
           strokeColor: casingColor,
-          strokeWeight: 11,
+          strokeWeight: 16,
           strokeOpacity: 0.9,
           fitbounds: false,
         });
 
-        // 2. High-vibrancy core line (Ultra-luminous Neon Cyan in dark mode, Electric Blue in light mode)
-        const coreColor = theme === 'dark' ? '#00f0ff' : '#2563eb';
+        // 2. High-vibrancy core line (Green for fastest/primary route)
+        const coreColor = '#10b981';
         polylineLayerRef.current = new window.mappls.Polyline({
           map: mapInstanceRef.current,
           path: pts,
           strokeColor: coreColor,
-          strokeWeight: 7.5,
+          strokeWeight: 12,
           strokeOpacity: 1.0,
           fitbounds: !isJourneyActive,
           fitboundOptions: { padding: 80 },
         });
 
         if (!isJourneyActive) {
-          const lats = route.coordinates.map(c => c[0]);
-          const lngs = route.coordinates.map(c => c[1]);
+          const lats = route.coordinates.map(c => c.lat);
+          const lngs = route.coordinates.map(c => c.lng);
           mapInstanceRef.current.fitBounds?.(
-            [[Math.min(...lats), Math.min(...lngs)], [Math.max(...lats), Math.max(...lngs)]],
+            [[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]],
             { padding: { top: 70, bottom: 70, left: 420, right: 70 } }
           );
         }
       } catch (e) { console.warn('Polyline error:', e); }
     }
   }, [route, theme, isJourneyActive, removeLayer]);
+
+  // Custom Scenic Route Polyline (Disabled to avoid confusion)
+  useEffect(() => {
+    // Disabled rendering of custom dummy route to prevent confusing overlapping lines
+  }, [customRouteCoords, theme, isJourneyActive, removeLayer]);
+
+  // AI Safe Route Polyline (Orange highlight)
+  useEffect(() => {
+    if (!mapInstanceRef.current || !window.mappls) return;
+    removeLayer(safePolylineCasingRef);
+    removeLayer(safePolylineLayerRef);
+    if (safeRouteCoords?.length && window.mappls.Polyline) {
+      try {
+        const pts = safeRouteCoords;
+
+        // 1. Casing (dark burnt orange)
+        safePolylineCasingRef.current = new window.mappls.Polyline({
+          map: mapInstanceRef.current,
+          path: pts,
+          strokeColor: '#7c2d12',
+          strokeWeight: 8,
+          strokeOpacity: 0.9,
+          fitbounds: false,
+        });
+
+        // 2. Core (vibrant orange)
+        safePolylineLayerRef.current = new window.mappls.Polyline({
+          map: mapInstanceRef.current,
+          path: pts,
+          strokeColor: '#f97316',
+          strokeWeight: 4.5,
+          strokeOpacity: 1.0,
+          fitbounds: false,
+        });
+      } catch (e) { console.warn('Safe route polyline error:', e); }
+    }
+  }, [safeRouteCoords, theme, isJourneyActive, removeLayer]);
+
+  // Hazard Markers on the map
+  useEffect(() => {
+    if (!mapInstanceRef.current || !window.mappls) return;
+    removeHazardCircles();
+
+    if (hazardZones && hazardZones.length > 0) {
+      hazardZones.forEach((hz) => {
+        const isAvoid = hz.risk_class === 'AVOID';
+        const bgColor = isAvoid ? '#ef4444' : (hz.risk_class === 'CAUTION' ? '#eab308' : '#3b82f6');
+        const borderColor = isAvoid ? '#b91c1c' : (hz.risk_class === 'CAUTION' ? '#ca8a04' : '#2563eb');
+        
+        let icon = '⚠️';
+        if (hz.name === 'FLOOD') icon = '🌊';
+        else if (hz.name === 'LANDSLIDE') icon = '⛰️';
+        else if (hz.name === 'CONSTRUCTION') icon = '🚧';
+        else if (hz.name === 'ACCIDENT') icon = '💥';
+        else if (hz.name === 'ROAD_CLOSURE') icon = '⛔';
+
+        const markerHtml = `
+          <div style="
+            background: ${bgColor}; 
+            border: 2px solid ${borderColor}; 
+            border-radius: 50%; 
+            width: 32px; 
+            height: 32px; 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            font-size: 16px; 
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+            cursor: pointer;
+            position: relative;
+          " title="${hz.name} (${hz.severity}): ${hz.reasons.join(', ')}">
+            ${icon}
+            ${isAvoid ? `<div style="position: absolute; top: -5px; right: -5px; background: white; border-radius: 50%; padding: 2px; font-size: 10px;">❌</div>` : ''}
+          </div>
+        `;
+
+        try {
+          if (!window.mappls?.Marker) return;
+          const marker = new (window.mappls as any).Marker({
+            map: mapInstanceRef.current,
+            position: hz.center,
+            html: markerHtml,
+            offset: [0, -16],
+            fitbounds: false,
+            popupHtml: `
+              <div style="padding: 10px; font-family: sans-serif; min-width: 200px;">
+                <h4 style="margin:0 0 5px 0; color: ${bgColor};">${hz.name}</h4>
+                <p style="margin:0 0 5px 0; font-size: 12px; font-weight: bold;">Severity: ${hz.severity}</p>
+                <p style="margin:0; font-size: 12px;">${hz.reasons.join('<br/>')}</p>
+                ${isAvoid ? `<p style="margin:5px 0 0 0; font-size: 12px; color: #ef4444; font-weight: bold;">⚠️ Route Avoided</p>` : ''}
+              </div>
+            `
+          });
+          hazardCirclesRef.current.push(marker);
+        } catch (e) {
+          console.warn('Failed to draw hazard marker:', e);
+        }
+      });
+    }
+  }, [hazardZones, removeHazardCircles]);
 
   // GPS marker + 3D perspective (Initial / standard GPS update)
   useEffect(() => {
@@ -299,7 +432,7 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     const handleMockDriveEvent = (e: any) => {
       const state = e.detail;
       const { lat, lng, bearing } = state;
-      
+
       const map = mapInstanceRef.current;
       if (!map) return;
 
@@ -326,7 +459,7 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
             map.setCenter({ lat, lng });
           }
         }
-      } catch {}
+      } catch { }
     };
 
     window.addEventListener('mock-drive-update', handleMockDriveEvent);
@@ -337,9 +470,9 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
     const map = mapInstanceRef.current; if (!map) return;
     try { map.setPitch?.(0); map.setBearing?.(0); updateBearingUI(0); setMapPitch(0); } catch { }
     if (route?.coordinates?.length) {
-      const lats = route.coordinates.map(c => c[0]);
-      const lngs = route.coordinates.map(c => c[1]);
-      map.fitBounds?.([[Math.min(...lats), Math.min(...lngs)], [Math.max(...lats), Math.max(...lngs)]], { padding: 80 });
+      const lats = route.coordinates.map(c => c.lat !== undefined ? c.lat : (c as any)[0]);
+      const lngs = route.coordinates.map(c => c.lng !== undefined ? c.lng : (c as any)[1]);
+      map.fitBounds?.([[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]], { padding: 80 });
     } else if (origin) { map.setCenter({ lat: origin.lat, lng: origin.lng }); map.setZoom(12); }
   };
 
