@@ -1,0 +1,16 @@
+{
+  "version": "1.0",
+  "build_timestamp": "2026-09-02T01:52:29.1380434+05:30",
+  "nodes_total": 19561076,
+  "edges_total": 19561076,
+  "covered_states": [
+    "assam",
+    "meghalaya",
+    "arunachal_pradesh",
+    "nagaland",
+    "manipur",
+    "mizoram",
+    "tripura",
+    "sikkim"
+  ]
+}

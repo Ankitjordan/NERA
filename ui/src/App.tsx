@@ -7,11 +7,14 @@ import { TripDetailsCard } from './components/TripDetailsCard';
 import { MockDriveControls } from './components/MockDriveControls';
 import { MockDriveHUD } from './components/MockDriveHUD';
 import { NavigationMap } from './components/NavigationMap';
+import type { HazardZoneDisplay } from './components/NavigationMap';
 import { TokenModal } from './components/TokenModal';
-import { fetchRouteDirections, calculateBearing } from './services/mapplsRouteService';
+import { RouteProgressBar } from './components/RouteProgressBar';
+import { calculateBearing, fetchSafeRoute, fetchActiveHazards } from './services/mapplsRouteService';
 import { MockDriveEngine } from './services/mockDriveEngine';
 import type { MockDriveState } from './services/mockDriveEngine';
 import type { RouteResult } from './services/mapplsRouteService';
+import { generateScenicRoute } from './services/mockCustomRoute';
 import './App.css';
 
 export function App() {
@@ -41,8 +44,13 @@ export function App() {
   });
 
   const [route, setRoute] = useState<RouteResult | null>(null);
+  const [customRouteCoords, setCustomRouteCoords] = useState<{lat: number, lng: number}[] | null>(null);
   const [isLoadingRoute, setIsLoadingRoute] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
+
+  // AI Safe Route State
+  const [safeRouteCoords, setSafeRouteCoords] = useState<{lat: number, lng: number}[] | null>(null);
+  const [hazardZones, setHazardZones] = useState<HazardZoneDisplay[]>([]);
 
   // Real Journey Navigation & Device GPS State
   const [isJourneyActive, setIsJourneyActive] = useState(false);
@@ -128,19 +136,61 @@ export function App() {
     stopMockDrive();
 
     try {
-      const res = await fetchRouteDirections(
-        { lat: activeOrigin.lat, lng: activeOrigin.lng },
-        { lat: activeDest.lat, lng: activeDest.lng },
-        'driving',
-        token
-      );
-      setRoute(res);
+      // Fetch both the safe route and the active hazards from the backend
+      const [safeRes, activeHazards] = await Promise.all([
+        fetchSafeRoute(
+          { lat: activeOrigin.lat, lng: activeOrigin.lng },
+          { lat: activeDest.lat, lng: activeDest.lng },
+          'driving'
+        ),
+        fetchActiveHazards(),
+      ]);
+
+      setRoute(safeRes.primary_route);
+      
+      // Generate the dummy customized scenic path
+      if (safeRes.primary_route?.coordinates) {
+        setCustomRouteCoords(generateScenicRoute(safeRes.primary_route.coordinates));
+      }
+
+      // Only draw the orange safe route if an alternate route was computed to avoid a hazard
+      if (safeRes.alternate_safe_route?.coordinates?.length) {
+        setSafeRouteCoords(safeRes.alternate_safe_route.coordinates as any);
+      } else {
+        setSafeRouteCoords(null);
+      }
+
+      // Build hazard zone display data for map circles / markers
+      const zones: HazardZoneDisplay[] = activeHazards.map((h: any) => {
+        // Check if this hazard is an AVOID hazard for the current route
+        const avoided = safeRes.avoided_hazards?.find((ah: any) => ah.id === h.id);
+        let riskClass: 'SAFE' | 'CAUTION' | 'AVOID' = 'SAFE';
+        let reasons: string[] = [h.reason];
+
+        if (avoided) {
+          riskClass = 'AVOID';
+          reasons = [avoided.reason];
+        } else if (h.severity === 'MEDIUM' || h.severity === 'LOW') {
+          riskClass = 'CAUTION';
+        }
+
+        return {
+          id: h.id,
+          center: { lat: h.latitude, lng: h.longitude },
+          radius_km: h.radius_m / 1000,
+          risk_class: riskClass,
+          name: h.type, // e.g. FLOOD, LANDSLIDE
+          severity: h.severity,
+          reasons: reasons,
+        };
+      });
+      setHazardZones(zones);
 
       // Automatically compute initial forward travel direction from route coordinates
-      if (res?.coordinates && res.coordinates.length >= 2) {
-        const p1 = res.coordinates[0];
-        const p2 = res.coordinates.length > 2 ? res.coordinates[2] : res.coordinates[1];
-        const initHeading = Math.round(calculateBearing(p1[0], p1[1], p2[0], p2[1]));
+      if (safeRes.primary_route?.coordinates && safeRes.primary_route.coordinates.length >= 2) {
+        const p1 = safeRes.primary_route.coordinates[0];
+        const p2 = safeRes.primary_route.coordinates.length > 2 ? safeRes.primary_route.coordinates[2] : safeRes.primary_route.coordinates[1];
+        const initHeading = Math.round(calculateBearing(p1.lat, p1.lng, p2.lat, p2.lng));
         setUserBearing(initHeading);
       }
     } catch (err: any) {
@@ -173,7 +223,11 @@ export function App() {
     if (route?.coordinates && route.coordinates.length >= 2) {
       const p1 = route.coordinates[0];
       const p2 = route.coordinates.length > 2 ? route.coordinates[2] : route.coordinates[1];
-      const initHeading = Math.round(calculateBearing(p1[0], p1[1], p2[0], p2[1]));
+      const p1Lat = p1.lat !== undefined ? p1.lat : (p1 as any)[0];
+      const p1Lng = p1.lng !== undefined ? p1.lng : (p1 as any)[1];
+      const p2Lat = p2.lat !== undefined ? p2.lat : (p2 as any)[0];
+      const p2Lng = p2.lng !== undefined ? p2.lng : (p2 as any)[1];
+      const initHeading = Math.round(calculateBearing(p1Lat, p1Lng, p2Lat, p2Lng));
       setUserBearing(initHeading);
     }
 
@@ -220,34 +274,42 @@ export function App() {
   }, []);
 
   const handleStartMockDrive = useCallback(() => {
-    if (!route?.coordinates?.length || route.coordinates.length < 2) return;
+    // Priority: AI Safe Route (Orange) > Custom Scenic Route (Green) > Primary Route (Blue)
+    const coordsToUse = safeRouteCoords || customRouteCoords || route?.coordinates;
+    if (!coordsToUse?.length || coordsToUse.length < 2) return;
 
     // Stop any existing journey
     handleEndJourney();
     stopMockDrive();
 
-    const engine = new MockDriveEngine(route.coordinates, mockDriveSpeed, handleMockDriveUpdate);
+    const engine = new MockDriveEngine(coordsToUse, mockDriveSpeed, handleMockDriveUpdate);
     mockDriveRef.current = engine;
 
     setIsMockDriveActive(true);
     setIsMockDrivePaused(false);
-    setMockDriveTotalDist(route.distance || 0);
+    setMockDriveTotalDist(route?.distance || 0);
     setIsJourneyActive(true);
     setViewMode('3d');
 
     // Place vehicle at start
-    const start = route.coordinates[0];
-    setUserGpsPosition([start[0], start[1]]);
+    const start = coordsToUse[0] as any;
+    const startLat = start.lat !== undefined ? start.lat : start[0];
+    const startLng = start.lng !== undefined ? start.lng : start[1];
+    setUserGpsPosition([startLat, startLng]);
 
     // Set initial bearing
-    if (route.coordinates.length >= 2) {
-      const p1 = route.coordinates[0];
-      const p2 = route.coordinates.length > 2 ? route.coordinates[2] : route.coordinates[1];
-      setUserBearing(Math.round(calculateBearing(p1[0], p1[1], p2[0], p2[1])));
+    if (coordsToUse.length >= 2) {
+      const p1 = coordsToUse[0] as any;
+      const p2 = (coordsToUse.length > 2 ? coordsToUse[2] : coordsToUse[1]) as any;
+      const p1Lat = p1.lat !== undefined ? p1.lat : p1[0];
+      const p1Lng = p1.lng !== undefined ? p1.lng : p1[1];
+      const p2Lat = p2.lat !== undefined ? p2.lat : p2[0];
+      const p2Lng = p2.lng !== undefined ? p2.lng : p2[1];
+      setUserBearing(Math.round(calculateBearing(p1Lat, p1Lng, p2Lat, p2Lng)));
     }
 
     engine.start();
-  }, [route, mockDriveSpeed, handleMockDriveUpdate, stopMockDrive]);
+  }, [route, customRouteCoords, safeRouteCoords, mockDriveSpeed, handleMockDriveUpdate, stopMockDrive]);
 
   const handlePauseMockDrive = useCallback(() => {
     mockDriveRef.current?.pause();
@@ -284,12 +346,15 @@ export function App() {
         onOpenTokenModal={() => setIsTokenModalOpen(true)}
       />
 
+      {/* Route / Graph Progress Bar */}
+      <RouteProgressBar isLoadingRoute={isLoadingRoute} />
+
       {/* Main Container */}
       <div className="nav-main-layout">
         {/* Floating Route Planner & Trip Panel */}
         <AnimatePresence>
           {!isMockDriveActive && (
-            <motion.div 
+            <motion.div
               className="floating-sidebar-panel"
               initial={{ x: -400, opacity: 0 }}
               animate={{ x: 0, opacity: 1 }}
@@ -312,24 +377,24 @@ export function App() {
                 </div>
               )}
 
-          {route && origin && destination && (
-            <>
-              <TripDetailsCard
-                route={route}
-                isJourneyActive={isJourneyActive && !isMockDriveActive}
-                viewMode={viewMode}
-                userSpeed={userSpeed}
-                onStartJourney={handleStartJourney}
-                onEndJourney={handleEndJourney}
-                onToggleViewMode={handleToggleViewMode}
-                onClose={() => { setRoute(null); stopMockDrive(); }}
-              />
+              {route && origin && destination && (
+                <>
+                  <TripDetailsCard
+                    route={route}
+                    isJourneyActive={isJourneyActive && !isMockDriveActive}
+                    viewMode={viewMode}
+                    userSpeed={userSpeed}
+                    onStartJourney={handleStartJourney}
+                    onEndJourney={handleEndJourney}
+                    onToggleViewMode={handleToggleViewMode}
+                    onClose={() => { setRoute(null); stopMockDrive(); setSafeRouteCoords(null); setHazardZones([]); }}
+                  />
 
-              <MockDriveControls
-                onStart={handleStartMockDrive}
-              />
-            </>
-          )}
+                  <MockDriveControls
+                    onStart={handleStartMockDrive}
+                  />
+                </>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -360,6 +425,9 @@ export function App() {
             origin={origin}
             destination={destination}
             route={route}
+            customRouteCoords={customRouteCoords || undefined}
+            safeRouteCoords={safeRouteCoords || undefined}
+            hazardZones={hazardZones.length > 0 ? hazardZones : undefined}
             isJourneyActive={isJourneyActive}
             viewMode={viewMode}
             userGpsPosition={userGpsPosition}
