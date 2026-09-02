@@ -47,3 +47,11 @@ response.json
 safe_response.json
 test_safe_route.json
 
+# AI Engine Python artifacts
+AI Engine/.venv/
+AI Engine/venv/
+AI Engine/__pycache__/
+AI Engine/**/*.pyc
+AI Engine/data/
+AI Engine/*.log
+

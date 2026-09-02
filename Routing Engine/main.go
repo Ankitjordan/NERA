@@ -60,7 +60,7 @@ func RunEngine(ctx context.Context, logger *slog.Logger, cfg EngineConfig) error
 	// Initialize the Startup Manager for graph persistence and loading
 	nerGraphPath := "ner_graph.gob"
 	metadataPath := "ner_graph_metadata.json"
-	pbfDir := `e:\NERA\ner_pbf`
+	pbfDir := `..\ner_pbf`
 
 	startupManager := startup.NewManager(nerGraphPath, metadataPath, pbfDir)
 	startupManager.StartAsync() // Begins background graph validation/download/build

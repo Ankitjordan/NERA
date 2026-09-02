@@ -75,21 +75,8 @@ func POCOSMRouteHandler(manager *startup.Manager) http.HandlerFunc {
 		hazardSvc := hazard.NewService()
 		activeHazards := hazardSvc.GetActiveHazards()
 
-		var targetHazard *models.Hazard
-		// For POC, we will try to route around the first high-severity hazard
-		for i, h := range activeHazards {
-			if h.Severity == models.SeverityHigh {
-				targetHazard = &activeHazards[i]
-				break
-			}
-		}
-
-		if targetHazard == nil && len(activeHazards) > 0 {
-			targetHazard = &activeHazards[0]
-		}
-
-		// Calculate alternate route using Dijkstra with dynamic nodes
-		altRoute, _, err := osm.RouteAroundHazard(g, startNode, endNode, targetHazard)
+		// Pass the FULL slice of active hazards to RouteAroundHazard
+		altRoute, _, err := osm.RouteAroundHazard(g, startNode, endNode, activeHazards)
 		if err != nil {
 			slog.Error("Failed to calculate alternate route", "error", err)
 			http.Error(w, "Failed to calculate alternate route", http.StatusInternalServerError)

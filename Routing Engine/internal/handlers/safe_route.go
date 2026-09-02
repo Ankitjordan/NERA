@@ -76,13 +76,6 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 		}
 
 		activeHazards := hazardSvc.GetActiveHazards()
-		var targetHazard *models.Hazard
-		for i, h := range activeHazards {
-			if h.Severity == models.SeverityHigh {
-				targetHazard = &activeHazards[i]
-				break
-			}
-		}
 
 		// 1. Calculate primary route (no hazard avoidance)
 		primaryPath, err := g.FindShortestPath(startNode, endNode, nil)
@@ -95,10 +88,11 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 			AvoidedHazards: []models.HazardIntersection{},
 		}
 
-		// Check if primary route intersects hazard
+		// 2. Check if primary route intersects ANY of the active hazards
 		intersects := false
-		if targetHazard != nil {
-			affectedEdgeIDs := osm.FindAffectedSegments(g, *targetHazard)
+		var affectedEdgeIDs []string
+		if len(activeHazards) > 0 {
+			affectedEdgeIDs = osm.FindAffectedSegments(g, activeHazards)
 			// Check if primary path uses any of these edges
 			for _, edge := range primaryPath.Edges {
 				for _, bID := range affectedEdgeIDs {
@@ -113,28 +107,33 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 			}
 		}
 
+		// 3. Reroute if dangerous
 		if intersects {
-			// Calculate alternate route
-			altPath, blockedIDs, err := osm.RouteAroundHazard(g, startNode, endNode, targetHazard)
+			// Calculate alternate route passing the FULL array of hazards
+			altPath, blockedIDs, err := osm.RouteAroundHazard(g, startNode, endNode, activeHazards)
 			if err == nil {
 				response.PrimaryRoute = buildRouteResult(g, primaryPath)
 				response.AlternateSafeRoute = buildRouteResult(g, altPath)
-				response.SelectionReason = "Avoided hazard using NER OSM graph."
-				response.AvoidedHazards = append(response.AvoidedHazards, models.HazardIntersection{
-					ID:              targetHazard.ID,
-					Type:            targetHazard.Type,
-					Severity:        targetHazard.Severity,
-					RadiusM:         targetHazard.RadiusM,
-					MinDistanceM:    0,
-					IntersectsRoute: true,
-					Action:          models.RiskActionAvoid,
-					Reason:          targetHazard.Reason,
-				})
+				response.SelectionReason = "Avoided multiple dynamic hazards using AI predictions."
+
+				// Send all avoided hazards to the UI for map rendering
+				for _, h := range activeHazards {
+					response.AvoidedHazards = append(response.AvoidedHazards, models.HazardIntersection{
+						ID:              h.ID,
+						Type:            h.Type,
+						Severity:        h.Severity,
+						RadiusM:         h.RadiusM,
+						MinDistanceM:    0,
+						IntersectsRoute: true,
+						Action:          models.RiskActionAvoid,
+						Reason:          h.Reason,
+					})
+				}
 				_ = blockedIDs
 			}
 		} else {
 			response.PrimaryRoute = buildRouteResult(g, primaryPath)
-			response.SelectionReason = "Primary route is safe."
+			response.SelectionReason = "Primary route is safe based on live telemetry."
 		}
 
 		w.Header().Set("Content-Type", "application/json")
