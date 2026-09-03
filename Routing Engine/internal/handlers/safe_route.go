@@ -88,36 +88,32 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 			AvoidedHazards: []models.HazardIntersection{},
 		}
 
-		// 2. Check if primary route intersects ANY of the active hazards
+		// 2. Check each active hazard against the primary route independently.
 		intersects := false
-		var affectedEdgeIDs []string
-		if len(activeHazards) > 0 {
-			affectedEdgeIDs = osm.FindAffectedSegments(g, activeHazards)
-			// Check if primary path uses any of these edges
+		intersectingHazards := make([]models.Hazard, 0, len(activeHazards))
+		for _, h := range activeHazards {
+			affectedEdgeIDs := osm.FindAffectedSegments(g, []models.Hazard{h})
 			for _, edge := range primaryPath.Edges {
-				for _, bID := range affectedEdgeIDs {
-					if edge.ID == bID {
-						intersects = true
-						break
-					}
-				}
-				if intersects {
+				if containsSegmentID(affectedEdgeIDs, edge.ID) {
+					intersects = true
+					intersectingHazards = append(intersectingHazards, h)
 					break
 				}
 			}
 		}
 
+		response.PrimaryRoute = buildRouteResult(g, primaryPath)
+
 		// 3. Reroute if dangerous
 		if intersects {
-			// Calculate alternate route passing the FULL array of hazards
-			altPath, blockedIDs, err := osm.RouteAroundHazard(g, startNode, endNode, activeHazards)
+			// Calculate alternate route around only hazards intersecting the primary path.
+			altPath, blockedIDs, err := osm.RouteAroundHazard(g, startNode, endNode, intersectingHazards)
 			if err == nil {
-				response.PrimaryRoute = buildRouteResult(g, primaryPath)
 				response.AlternateSafeRoute = buildRouteResult(g, altPath)
 				response.SelectionReason = "Avoided multiple dynamic hazards using AI predictions."
 
-				// Send all avoided hazards to the UI for map rendering
-				for _, h := range activeHazards {
+				// Report only hazards that actually intersected the primary route.
+				for _, h := range intersectingHazards {
 					response.AvoidedHazards = append(response.AvoidedHazards, models.HazardIntersection{
 						ID:              h.ID,
 						Type:            h.Type,
@@ -130,15 +126,25 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 					})
 				}
 				_ = blockedIDs
+			} else {
+				response.SelectionReason = "Hazard intersects route, but no alternate route was found."
 			}
 		} else {
-			response.PrimaryRoute = buildRouteResult(g, primaryPath)
 			response.SelectionReason = "Primary route is safe based on live telemetry."
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 	}
+}
+
+func containsSegmentID(segmentIDs []string, target string) bool {
+	for _, id := range segmentIDs {
+		if id == target {
+			return true
+		}
+	}
+	return false
 }
 
 // buildRouteResult converts an internal graph PathResult into a frontend-friendly RouteResult

@@ -214,15 +214,17 @@ export function App() {
     setIsJourneyActive(true);
     setViewMode('3d');
 
+    const activeRouteCoords = safeRouteCoords || route?.coordinates;
+
     // Default position to origin coordinates if GPS not acquired yet
     if (origin && !userGpsPosition) {
       setUserGpsPosition([origin.lat, origin.lng]);
     }
 
     // Set initial vehicle heading facing along the route
-    if (route?.coordinates && route.coordinates.length >= 2) {
-      const p1 = route.coordinates[0];
-      const p2 = route.coordinates.length > 2 ? route.coordinates[2] : route.coordinates[1];
+    if (activeRouteCoords && activeRouteCoords.length >= 2) {
+      const p1 = activeRouteCoords[0];
+      const p2 = activeRouteCoords.length > 2 ? activeRouteCoords[2] : activeRouteCoords[1];
       const p1Lat = p1.lat !== undefined ? p1.lat : (p1 as any)[0];
       const p1Lng = p1.lng !== undefined ? p1.lng : (p1 as any)[1];
       const p2Lat = p2.lat !== undefined ? p2.lat : (p2 as any)[0];

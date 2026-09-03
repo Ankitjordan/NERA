@@ -8,9 +8,10 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/qedus/osmpbf"
 	"routing-engine/internal/poc/graph"
 	"routing-engine/internal/utils"
+
+	"github.com/qedus/osmpbf"
 )
 
 // Drivable highway types
@@ -130,8 +131,7 @@ func readWays(path string, g *graph.Graph) error {
 					oneway = true
 				}
 
-				// Create edges between consecutive nodes
-				wayIDStr := fmt.Sprintf("way-%d", v.ID)
+				// Create independently blockable edges between consecutive nodes.
 				for i := 0; i < len(v.NodeIDs)-1; i++ {
 					// We only add edges for nodes that are actually in the graph
 					n1Int, ok1 := g.OSMToInternal[v.NodeIDs[i]]
@@ -153,12 +153,14 @@ func readWays(path string, g *graph.Graph) error {
 					// Calculate distance in meters using Haversine
 					dist := utils.HaversineDistanceM(c1.Lat, c1.Lon, c2.Lat, c2.Lon)
 
+					segmentID := fmt.Sprintf("way-%d-segment-%d", v.ID, i)
+
 					// Add forward edge
-					g.AddEdge(wayIDStr, n1Int, n2Int, dist)
+					g.AddEdge(segmentID+"-forward", n1Int, n2Int, dist)
 
 					// Add reverse edge if not one-way
 					if !oneway {
-						g.AddEdge(wayIDStr, n2Int, n1Int, dist)
+						g.AddEdge(segmentID+"-reverse", n2Int, n1Int, dist)
 					}
 				}
 			}

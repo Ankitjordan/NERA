@@ -31,7 +31,7 @@ const DEST_MARKER_HTML = `
 </div>`;
 
 const USER_GPS_MARKER_HTML = `
-<div style="position:relative;width:22px;height:22px;">
+<div style="position:relative;width:22px;height:22px;transform:translate(-50%,-50%);">
   <div style="position:absolute;inset:0;border-radius:50%;background:rgba(59,130,246,0.25);animation:gps-ring 1.8s ease-out infinite;"></div>
   <div style="position:absolute;top:5px;left:5px;width:12px;height:12px;border-radius:50%;background:#3b82f6;border:2.5px solid #fff;box-shadow:0 0 6px rgba(59,130,246,0.7);"></div>
 </div>`;

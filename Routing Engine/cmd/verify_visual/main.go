@@ -63,7 +63,7 @@ func main() {
 			Active:    true,
 		}
 
-		blocked := osm.FindAffectedSegments(g, testHazard)
+		blocked := osm.FindAffectedSegments(g, []models.Hazard{testHazard})
 		altPath, altErr := g.FindShortestPath(startNode, endNode, blocked)
 		if altErr != nil {
 			fmt.Printf("Fraction %.2f (Lat %.4f, Lng %.4f): Blocked %d edges -> Alternate FAILED: %v\n", fraction, c.Lat, c.Lon, len(blocked), altErr)
