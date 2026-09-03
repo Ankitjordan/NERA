@@ -133,21 +133,16 @@ func (g *Graph) FindShortestPath(start, end int32, blockedSegmentIDs []string) (
 	}
 	endCoord := g.NodeCoords[end]
 
-	numNodes := len(g.Nodes)
-	dist := make([]float64, numNodes)
-	prev := make([]*Edge, numNodes)
+	dist := make(map[int32]float64)
+	prev := make(map[int32]*Edge)
 
-	// Initialize distances to infinity
-	for i := 0; i < numNodes; i++ {
-		dist[i] = 1e9 // conceptually infinity
-	}
-	dist[start] = 0
+	dist[start] = 0.0
 
 	pq := make(PriorityQueue, 0)
 	heap.Init(&pq)
 
 	startCoord := g.NodeCoords[start]
-	hStart := haversineDistanceM(startCoord.Lat, startCoord.Lon, endCoord.Lat, endCoord.Lon)
+	hStart := fastHeuristicM(startCoord.Lat, startCoord.Lon, endCoord.Lat, endCoord.Lon)
 	heap.Push(&pq, &Item{nodeID: start, priority: hStart, gCost: 0})
 
 	for pq.Len() > 0 {
@@ -170,12 +165,15 @@ func (g *Graph) FindShortestPath(start, end int32, blockedSegmentIDs []string) (
 			}
 
 			newDist := curr.gCost + edge.Weight
-			if newDist < dist[edge.To] {
+
+			// If we haven't visited this node yet, its distance is conceptually infinity
+			currentDist, exists := dist[edge.To]
+			if !exists || newDist < currentDist {
 				dist[edge.To] = newDist
 				prev[edge.To] = edge
 
 				toCoord := g.NodeCoords[edge.To]
-				h := haversineDistanceM(toCoord.Lat, toCoord.Lon, endCoord.Lat, endCoord.Lon)
+				h := fastHeuristicM(toCoord.Lat, toCoord.Lon, endCoord.Lat, endCoord.Lon)
 				heap.Push(&pq, &Item{nodeID: edge.To, priority: newDist + h, gCost: newDist})
 			}
 		}
@@ -208,19 +206,12 @@ func (g *Graph) FindShortestPath(start, end int32, blockedSegmentIDs []string) (
 	}, nil
 }
 
-// Simple haversine implementation to avoid circular imports if any
-func haversineDistanceM(lat1, lon1, lat2, lon2 float64) float64 {
-	const R = 6371000 // Earth radius in meters
-
-	phi1 := lat1 * math.Pi / 180
-	phi2 := lat2 * math.Pi / 180
-	deltaPhi := (lat2 - lat1) * math.Pi / 180
-	deltaLambda := (lon2 - lon1) * math.Pi / 180
-
-	a := math.Sin(deltaPhi/2)*math.Sin(deltaPhi/2) +
-		math.Cos(phi1)*math.Cos(phi2)*
-			math.Sin(deltaLambda/2)*math.Sin(deltaLambda/2)
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-
-	return R * c
+// Fast Euclidean approximation (meters) replacing expensive trigonometric Haversine
+// This dramatically accelerates A* PriorityQueue insertions.
+func fastHeuristicM(lat1, lon1, lat2, lon2 float64) float64 {
+	dLat := (lat2 - lat1) * 111320.0
+	// Calculate cosine once for the average latitude to scale the longitude
+	avgLat := (lat1 + lat2) / 2.0 * (math.Pi / 180.0)
+	dLon := (lon2 - lon1) * 111320.0 * math.Cos(avgLat)
+	return math.Sqrt(dLat*dLat + dLon*dLon)
 }

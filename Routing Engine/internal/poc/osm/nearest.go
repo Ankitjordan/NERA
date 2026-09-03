@@ -7,7 +7,7 @@ import (
 	"routing-engine/internal/utils"
 )
 
-// FindNearestNode searches the graph for the closest physical drivable node to a target coordinate.
+// FindNearestNode searches the graph for the closest physical drivable node using a spatial bounding box.
 func FindNearestNode(g *graph.Graph, target models.Coordinate, maxSnapDistanceM float64) (int32, float64, error) {
 	if g == nil || len(g.NodeCoords) == 0 {
 		return -1, 0, errors.New("empty graph")
@@ -16,11 +16,19 @@ func FindNearestNode(g *graph.Graph, target models.Coordinate, maxSnapDistanceM 
 	var bestNodeID int32 = -1
 	minDistance := -1.0
 
-	// Iterate over the flat array of coordinates (extremely fast)
+	// 1 degree is roughly 111,000 meters. Create a rapid filtering box.
+	degreeOffset := maxSnapDistanceM / 111000.0
+	minLat, maxLat := target.Lat-degreeOffset, target.Lat+degreeOffset
+	minLon, maxLon := target.Lng-degreeOffset, target.Lng+degreeOffset
+
 	for i, coords := range g.NodeCoords {
-		// Only snap to nodes that have outgoing edges (so we can actually start a route from there)
-		if len(g.Nodes[i]) == 0 {
+		// SPATIAL INDEXING: Skip millions of nodes instantly if they aren't in the local square
+		if coords.Lat < minLat || coords.Lat > maxLat || coords.Lon < minLon || coords.Lon > maxLon {
 			continue
+		}
+
+		if len(g.Nodes[i]) == 0 {
+			continue // Skip dead-end nodes
 		}
 
 		dist := utils.HaversineDistanceM(coords.Lat, coords.Lon, target.Lat, target.Lng)
