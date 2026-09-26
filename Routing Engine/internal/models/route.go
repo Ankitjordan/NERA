@@ -51,6 +51,7 @@ type RouteResult struct {
 	Polyline    string       `json:"polyline"`
 	Coordinates []Coordinate `json:"coordinates"`
 	Steps       []RouteStep  `json:"steps"`
+	Language    string       `json:"language,omitempty"`
 }
 
 type RouteStep struct {
@@ -72,4 +73,5 @@ type SafeRouteResponse struct {
 	AlternateSafeRoute *RouteResult         `json:"alternate_safe_route,omitempty"`
 	AvoidedHazards     []HazardIntersection `json:"avoided_hazards"`
 	SelectionReason    string               `json:"selection_reason,omitempty"`
+	Language           string               `json:"language,omitempty"`
 }

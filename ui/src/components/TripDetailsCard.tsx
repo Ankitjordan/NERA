@@ -2,6 +2,7 @@ import React from 'react';
 import { Navigation, Compass, X, StopCircle } from 'lucide-react';
 import { formatDistance, formatDuration } from '../services/mapplsRouteService';
 import type { RouteResult } from '../services/mapplsRouteService';
+import { useI18n } from '../i18n';
 
 interface TripDetailsCardProps {
   route: RouteResult;
@@ -23,7 +24,10 @@ export const TripDetailsCard: React.FC<TripDetailsCardProps> = ({
   onEndJourney,
   onToggleViewMode,
   onClose,
-}) => (
+}) => {
+  const { t } = useI18n();
+
+  return (
   <div className="trip-card">
     {/* Stats row */}
     <div className="trip-stats">
@@ -39,12 +43,12 @@ export const TripDetailsCard: React.FC<TripDetailsCardProps> = ({
       {!isJourneyActive ? (
         <button className="trip-start-btn" onClick={onStartJourney}>
           <Navigation size={16} />
-          Start Drive
+          {t('startDrive')}
         </button>
       ) : (
         <button className="trip-stop-btn" onClick={onEndJourney}>
           <StopCircle size={16} />
-          End Drive
+          {t('endDrive')}
         </button>
       )}
       <button className="trip-view-btn" onClick={onToggleViewMode}>
@@ -62,13 +66,14 @@ export const TripDetailsCard: React.FC<TripDetailsCardProps> = ({
         </div>
         <div className="hud-stat">
           <span className="hud-val">{formatDistance(route.distance)}</span>
-          <span className="hud-unit">total</span>
+          <span className="hud-unit">{t('total')}</span>
         </div>
         <div className="hud-stat">
           <span className="hud-val">{formatDuration(route.duration)}</span>
-          <span className="hud-unit">est.</span>
+          <span className="hud-unit">{t('estimated')}</span>
         </div>
       </div>
     )}
   </div>
-);
+  );
+};

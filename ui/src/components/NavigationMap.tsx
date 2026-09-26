@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import type { RouteResult } from '../services/mapplsRouteService';
 import type { LocationPoint } from './RouteSearchBox';
+import { useI18n } from '../i18n';
 
 /* ── Custom HTML Marker Templates ────────────────────────────────── */
 const ORIGIN_MARKER_HTML = `
@@ -81,6 +82,7 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
   onToggleViewMode,
   onOpenTokenModal,
 }) => {
+  const { t } = useI18n();
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
   const originMarkerRef = useRef<any>(null);
@@ -576,16 +578,16 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
 
       {/* Top-Right Standard Controls */}
       <div className="map-floating-controls">
-        <button title={`${theme === 'dark' ? 'Light' : 'Dark'} mode`} onClick={onToggleTheme} className="map-ctrl-btn">
+        <button title={`${theme === 'dark' ? t('light') : t('dark')} ${t('mode')}`} onClick={onToggleTheme} className="map-ctrl-btn">
           {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
         </button>
         <button title={`${viewMode.toUpperCase()} view`} onClick={onToggleViewMode} className={`map-ctrl-btn ${viewMode === '3d' ? 'active' : ''}`}>
           <Compass size={16} />
         </button>
-        <button title="Recenter" onClick={recenter} className="map-ctrl-btn"><RotateCcw size={15} /></button>
+        <button title={t('recenter')} onClick={recenter} className="map-ctrl-btn"><RotateCcw size={15} /></button>
         <div className="ctrl-divider" />
-        <button title="Zoom in" onClick={() => mapInstanceRef.current?.setZoom(mapInstanceRef.current.getZoom() + 1)} className="map-ctrl-btn"><ZoomIn size={15} /></button>
-        <button title="Zoom out" onClick={() => mapInstanceRef.current?.setZoom(mapInstanceRef.current.getZoom() - 1)} className="map-ctrl-btn"><ZoomOut size={15} /></button>
+        <button title={t('zoomIn')} onClick={() => mapInstanceRef.current?.setZoom(mapInstanceRef.current.getZoom() + 1)} className="map-ctrl-btn"><ZoomIn size={15} /></button>
+        <button title={t('zoomOut')} onClick={() => mapInstanceRef.current?.setZoom(mapInstanceRef.current.getZoom() - 1)} className="map-ctrl-btn"><ZoomOut size={15} /></button>
       </div>
 
       {/* Bottom-Right Google Maps Interactive Compass Widget */}
@@ -679,9 +681,9 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
         <div className="map-error-overlay">
           <div className="error-card">
             <AlertTriangle size={22} />
-            <h3>Map Unavailable</h3>
+            <h3>{t('mapUnavailable')}</h3>
             <p>{loadError}</p>
-            <button onClick={onOpenTokenModal}>Configure Key</button>
+            <button onClick={onOpenTokenModal}>{t('configureKey')}</button>
           </div>
         </div>
       )}

@@ -3,6 +3,7 @@ import { Shield, AlertTriangle, AlertOctagon, ChevronDown, ChevronUp } from 'luc
 import type { RiskAssessment } from '../services/riskEngine';
 import { formatDistance, formatDuration } from '../services/mapplsRouteService';
 import type { RouteResult } from '../services/mapplsRouteService';
+import { useI18n } from '../i18n';
 
 interface AvoidedAreasCardProps {
   assessments: RiskAssessment[];
@@ -19,6 +20,7 @@ export const AvoidedAreasCard: React.FC<AvoidedAreasCardProps> = ({
   bypassUsed,
   isValidated,
 }) => {
+  const { t } = useI18n();
   const [isExpanded, setIsExpanded] = React.useState(true);
 
   const avoidAreas = assessments.filter(a => a.risk_class === 'AVOID');
@@ -36,13 +38,13 @@ export const AvoidedAreasCard: React.FC<AvoidedAreasCardProps> = ({
       <div className="avoided-header" onClick={() => setIsExpanded(prev => !prev)}>
         <div className="avoided-title-row">
           <Shield size={16} className="avoided-shield-icon" />
-          <span className="avoided-title">AI Safety Analysis</span>
+          <span className="avoided-title">{t('aiSafetyAnalysis')}</span>
           <span className="avoided-badge-count">
             {avoidAreas.length > 0 && (
-              <span className="badge-avoid">{avoidAreas.length} Avoid</span>
+              <span className="badge-avoid">{avoidAreas.length} {t('avoid')}</span>
             )}
             {cautionAreas.length > 0 && (
-              <span className="badge-caution">{cautionAreas.length} Caution</span>
+              <span className="badge-caution">{cautionAreas.length} {t('caution')}</span>
             )}
           </span>
         </div>
@@ -58,8 +60,8 @@ export const AvoidedAreasCard: React.FC<AvoidedAreasCardProps> = ({
             <div className="safe-route-stats">
               <div className="safe-route-label">
                 <span className="orange-dot" />
-                Recommended Safe Route
-                {isValidated && <span className="validated-badge">✓ Validated</span>}
+                {t('recommendedSafeRoute')}
+                {isValidated && <span className="validated-badge">✓ {t('validated')}</span>}
               </div>
               <div className="safe-route-numbers">
                 <span>{formatDistance(safeRoute.distance)}</span>

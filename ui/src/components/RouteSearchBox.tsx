@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { fetchAutosuggest, geocodePlace } from '../services/mapplsRouteService';
 import type { PlaceSuggestion } from '../services/mapplsRouteService';
+import { useI18n } from '../i18n';
 
 export interface LocationPoint {
   name: string;
@@ -33,6 +34,7 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
   token, origin, destination, isLoadingRoute,
   onSetOrigin, onSetDestination, onCalculateRoute,
 }) => {
+  const { language, t } = useI18n();
   const [oText, setOText] = useState(origin?.name || '');
   const [dText, setDText] = useState(destination?.name || '');
   const [oSug, setOSug] = useState<PlaceSuggestion[]>([]);
@@ -58,30 +60,30 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
     if (!oText || oText === origin?.name || oText.trim().length < 2) { setOSug([]); return; }
     const t = setTimeout(async () => {
       setSearchO(true);
-      setOSug(await fetchAutosuggest(oText, token));
+      setOSug(await fetchAutosuggest(oText, token, undefined, language));
       setSearchO(false);
       setDrop('o');
     }, 220);
     return () => clearTimeout(t);
-  }, [oText, origin, token]);
+  }, [oText, origin, token, language]);
 
   // Dest autosuggest
   useEffect(() => {
     if (!dText || dText === destination?.name || dText.trim().length < 2) { setDSug([]); return; }
     const t = setTimeout(async () => {
       setSearchD(true);
-      setDSug(await fetchAutosuggest(dText, token, origin ? { lat: origin.lat, lng: origin.lng } : undefined));
+      setDSug(await fetchAutosuggest(dText, token, origin ? { lat: origin.lat, lng: origin.lng } : undefined, language));
       setSearchD(false);
       setDrop('d');
     }, 220);
     return () => clearTimeout(t);
-  }, [dText, destination, origin, token]);
+  }, [dText, destination, origin, token, language]);
 
   const pick = async (item: PlaceSuggestion, tgt: 'o' | 'd') => {
     let lat = item.latitude, lng = item.longitude;
     if (!lat || !lng) {
       setResolving(true);
-      const g = await geocodePlace(`${item.placeName}, ${item.placeAddress}`, token);
+      const g = await geocodePlace(`${item.placeName}, ${item.placeAddress}`, token, language);
       setResolving(false);
       if (g) { lat = g.lat; lng = g.lng; }
     }
@@ -102,7 +104,7 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
     if (!navigator.geolocation) return;
     setGpsing(true);
     navigator.geolocation.getCurrentPosition(
-      p => { setGpsing(false); const pt: LocationPoint = { name: 'Current Location', lat: p.coords.latitude, lng: p.coords.longitude }; setOText(pt.name); onSetOrigin(pt); },
+      p => { setGpsing(false); const pt: LocationPoint = { name: t('currentLocation'), lat: p.coords.latitude, lng: p.coords.longitude }; setOText(pt.name); onSetOrigin(pt); },
       () => { setGpsing(false); const fb: LocationPoint = { name: 'Guwahati, Assam', lat: 26.1445, lng: 91.7362 }; setOText(fb.name); onSetOrigin(fb); },
       { timeout: 8000, enableHighAccuracy: true }
     );
@@ -115,11 +117,11 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
     setResolving(true);
     try {
       if ((!ao || ao.name !== oText) && oText.trim()) {
-        const g = await geocodePlace(oText, token);
+        const g = await geocodePlace(oText, token, language);
         if (g) { ao = { name: oText, lat: g.lat, lng: g.lng }; onSetOrigin(ao); }
       }
       if ((!ad || ad.name !== dText) && dText.trim()) {
-        const g = await geocodePlace(dText, token);
+        const g = await geocodePlace(dText, token, language);
         if (g) { ad = { name: dText, lat: g.lat, lng: g.lng }; onSetDestination(ad); }
       }
     } finally { setResolving(false); }
@@ -141,7 +143,7 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
         <div className="search-row">
           <span className="marker-dot origin">A</span>
           <div className="search-input-wrap">
-            <input placeholder="Starting point" value={oText}
+            <input placeholder={t('startingPoint')} value={oText}
               onChange={e => setOText(e.target.value)}
               onFocus={() => oSug.length && setDrop('o')}
               onKeyDown={e => e.key === 'Enter' && submit()} />
@@ -176,7 +178,7 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
         <div className="search-row">
           <span className="marker-dot dest">B</span>
           <div className="search-input-wrap">
-            <input placeholder="Destination" value={dText}
+            <input placeholder={t('destination')} value={dText}
               onChange={e => setDText(e.target.value)}
               onFocus={() => dSug.length && setDrop('d')}
               onKeyDown={e => e.key === 'Enter' && submit()} />
@@ -200,7 +202,7 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
 
         {/* Submit */}
         <button type="submit" disabled={(!oText.trim() && !origin) || (!dText.trim() && !destination) || isLoadingRoute || resolving} className="route-btn">
-          {isLoadingRoute || resolving ? <><Loader2 size={15} className="spin" /> Finding route…</> : <><Navigation size={15} /> Get Directions</>}
+          {isLoadingRoute || resolving ? <><Loader2 size={15} className="spin" /> {t('findingRoute')}</> : <><Navigation size={15} /> {t('getDirections')}</>}
         </button>
       </form>
     </div>

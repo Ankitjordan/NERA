@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"routing-engine/internal/localization"
 	"routing-engine/internal/models"
 	"routing-engine/internal/poc/graph"
 	"routing-engine/internal/poc/osm"
@@ -19,6 +20,8 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")
+		language := localization.FromRequest(r)
+		w.Header().Set("Content-Language", language)
 
 		g := manager.GetGraph()
 		if g == nil {
@@ -86,6 +89,7 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 
 		response := models.SafeRouteResponse{
 			AvoidedHazards: []models.HazardIntersection{},
+			Language:       language,
 		}
 
 		// 2. Check each active hazard against the primary route independently.
@@ -110,7 +114,7 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 			altPath, blockedIDs, err := osm.RouteAroundHazard(g, startNode, endNode, intersectingHazards)
 			if err == nil {
 				response.AlternateSafeRoute = buildRouteResult(g, altPath)
-				response.SelectionReason = "Avoided multiple dynamic hazards using AI predictions."
+				response.SelectionReason = localization.Message(language, "hazard_avoided")
 
 				// Report only hazards that actually intersected the primary route.
 				for _, h := range intersectingHazards {
@@ -127,10 +131,10 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 				}
 				_ = blockedIDs
 			} else {
-				response.SelectionReason = "Hazard intersects route, but no alternate route was found."
+				response.SelectionReason = localization.Message(language, "hazard_no_alternate")
 			}
 		} else {
-			response.SelectionReason = "Primary route is safe based on live telemetry."
+			response.SelectionReason = localization.Message(language, "primary_safe")
 		}
 
 		w.Header().Set("Content-Type", "application/json")

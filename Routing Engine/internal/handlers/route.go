@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"routing-engine/internal/localization"
 	"routing-engine/internal/services/routing"
 )
 
@@ -26,6 +27,8 @@ func RouteHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	language := localization.FromRequest(r)
+	w.Header().Set("Content-Language", language)
 
 	waypoints := r.URL.Query().Get("waypoints")
 	profile := r.URL.Query().Get("profile")
@@ -34,7 +37,7 @@ func RouteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if waypoints == "" {
-		http.Error(w, "Missing waypoints", http.StatusBadRequest)
+		http.Error(w, localization.Message(language, "missing_waypoints"), http.StatusBadRequest)
 		return
 	}
 
@@ -48,13 +51,14 @@ func RouteHandler(w http.ResponseWriter, r *http.Request) {
 	result, err := routing.FetchRoute(waypoints, profile, token, nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "no route found") {
-			http.Error(w, "No route found", http.StatusNotFound)
+			http.Error(w, localization.Message(language, "route_not_found"), http.StatusNotFound)
 		} else {
-			http.Error(w, "Failed to process route", http.StatusBadGateway)
+			http.Error(w, localization.Message(language, "route_failed"), http.StatusBadGateway)
 		}
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	result.Language = language
 	json.NewEncoder(w).Encode(result)
 }

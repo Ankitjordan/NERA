@@ -61,11 +61,16 @@ Routing Engine/
     handlers/
       hazard_test.go
       hazard.go
+      mock_drive_test.go
+      mock_drive.go
       poc_osm.go
       route.go
       safe_route_test.go
       safe_route.go
       status.go
+    localization/
+      localization_test.go
+      localization.go
     models/
       hazard_intersection.go
       hazard_test.go
@@ -107,6 +112,7 @@ Routing Engine/
   ner_graph_metadata.json
 ui/
   docs/
+    localization.md
     requirments.md
     statement.md
     step0.md
@@ -124,6 +130,7 @@ ui/
       MockDriveControls.tsx
       MockDriveHUD.tsx
       NavigationMap.tsx
+      ReroutePreview.tsx
       RouteProgressBar.tsx
       RouteSearchBox.tsx
       TokenModal.tsx
@@ -137,12 +144,14 @@ ui/
       mapplsRouteService.ts
       mockCustomRoute.ts
       mockDriveEngine.ts
+      mockDriveTelemetry.ts
       riskEngine.ts
       safeRouteService.ts
     types/
       mappls.d.ts
     App.css
     App.tsx
+    i18n.ts
     index.css
     main.tsx
   .env.example
@@ -171,6 +180,523 @@ test_safe_route.py
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="Routing Engine/internal/handlers/mock_drive_test.go">
+package handlers
+
+import (
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+func TestMockDriveWebSocketUpdatesTracker(t *testing.T) {
+	tracker := NewMockDriveTracker()
+	server := httptest.NewServer(MockDriveWebSocketHandler(tracker))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):]
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.Close()
+
+	want := MockDrivePosition{Lat: 26.1445, Lng: 91.7362, Progress: 0.25, SegmentIndex: 4}
+	if err := conn.WriteJSON(want); err != nil {
+		t.Fatalf("write position: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		got, connected, ok := tracker.snapshot()
+		if ok && connected {
+			if got.Lat != want.Lat || got.Lng != want.Lng || got.Progress != want.Progress || got.SegmentIndex != want.SegmentIndex {
+				t.Fatalf("tracker position = %+v, want %+v", got, want)
+			}
+			if got.UpdatedAt.IsZero() {
+				t.Fatal("tracker did not timestamp the update")
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("tracker did not receive websocket position")
+}
+</file>
+
+<file path="Routing Engine/internal/handlers/mock_drive.go">
+package handlers
+
+import (
+	"encoding/json"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+type MockDrivePosition struct {
+	Lat              float64   `json:"lat"`
+	Lng              float64   `json:"lng"`
+	Bearing          float64   `json:"bearing"`
+	SpeedKmh         float64   `json:"speedKmh"`
+	DistanceCoveredM float64   `json:"distanceCoveredM"`
+	TotalDistanceM   float64   `json:"totalDistanceM"`
+	Progress         float64   `json:"progress"`
+	SegmentIndex     int       `json:"segmentIndex"`
+	Finished         bool      `json:"finished"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+}
+
+type MockDriveTracker struct {
+	mu        sync.RWMutex
+	position  *MockDrivePosition
+	connected bool
+}
+
+func NewMockDriveTracker() *MockDriveTracker { return &MockDriveTracker{} }
+
+func (t *MockDriveTracker) update(position MockDrivePosition) {
+	position.UpdatedAt = time.Now().UTC()
+	t.mu.Lock()
+	t.position = &position
+	t.mu.Unlock()
+}
+
+func (t *MockDriveTracker) setConnected(connected bool) {
+	t.mu.Lock()
+	t.connected = connected
+	t.mu.Unlock()
+}
+
+func (t *MockDriveTracker) snapshot() (MockDrivePosition, bool, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.position == nil {
+		return MockDrivePosition{}, t.connected, false
+	}
+	return *t.position, t.connected, true
+}
+
+var mockDriveUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+func MockDriveWebSocketHandler(tracker *MockDriveTracker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		conn, err := mockDriveUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		tracker.setConnected(true)
+		defer tracker.setConnected(false)
+
+		for {
+			var position MockDrivePosition
+			if err := conn.ReadJSON(&position); err != nil {
+				return
+			}
+			tracker.update(position)
+		}
+	}
+}
+
+func MockDrivePositionHandler(tracker *MockDriveTracker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		position, connected, hasPosition := tracker.snapshot()
+		response := struct {
+			Connected bool               `json:"connected"`
+			Position  *MockDrivePosition `json:"position,omitempty"`
+		}{Connected: connected}
+		if hasPosition {
+			response.Position = &position
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}
+}
+</file>
+
+<file path="Routing Engine/internal/localization/localization_test.go">
+package localization
+
+import (
+	"net/http/httptest"
+	"testing"
+)
+
+func TestNormalize(t *testing.T) {
+	tests := map[string]string{
+		"en":      "en",
+		"as-IN":   "as",
+		"bn_in":   "bn",
+		"invalid": "en",
+		"":        "en",
+	}
+	for input, want := range tests {
+		if got := Normalize(input); got != want {
+			t.Errorf("Normalize(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestFromRequestPrefersQueryLanguage(t *testing.T) {
+	req := httptest.NewRequest("GET", "/api/v1/route?language=lus-IN", nil)
+	req.Header.Set("Accept-Language", "bn-IN")
+	if got := FromRequest(req); got != "lus" {
+		t.Fatalf("FromRequest() = %q, want lus", got)
+	}
+}
+
+func TestMessageFallsBackToEnglish(t *testing.T) {
+	if got := Message("mni", "missing_waypoints"); got != "Missing waypoints" {
+		t.Fatalf("Message() = %q, want English fallback", got)
+	}
+}
+</file>
+
+<file path="Routing Engine/internal/localization/localization.go">
+package localization
+
+import (
+	"net/http"
+	"strings"
+)
+
+const DefaultLanguage = "en"
+
+var supportedLanguages = map[string]struct{}{
+	"en": {}, "as": {}, "bn": {}, "brx": {}, "kha": {}, "grt": {},
+	"mni": {}, "lus": {}, "njo": {}, "ne": {}, "trp": {}, "inc": {},
+}
+
+var messages = map[string]map[string]string{
+	"en": {
+		"missing_waypoints":   "Missing waypoints",
+		"invalid_waypoints":   "Invalid waypoints format",
+		"route_not_found":     "No route found",
+		"route_failed":        "Failed to process route",
+		"primary_safe":        "Primary route is safe based on live telemetry.",
+		"hazard_avoided":      "Avoided multiple dynamic hazards using AI predictions.",
+		"hazard_no_alternate": "Hazard intersects route, but no alternate route was found.",
+	},
+}
+
+func Normalize(code string) string {
+	code = strings.ToLower(strings.TrimSpace(code))
+	if separator := strings.IndexAny(code, "-_"); separator > 0 {
+		code = code[:separator]
+	}
+	if _, ok := supportedLanguages[code]; ok {
+		return code
+	}
+	return DefaultLanguage
+}
+
+func FromRequest(r *http.Request) string {
+	code := r.URL.Query().Get("language")
+	if code == "" {
+		code = r.Header.Get("Accept-Language")
+	}
+	return Normalize(code)
+}
+
+func Message(language, key string) string {
+	language = Normalize(language)
+	if translations, ok := messages[language]; ok {
+		if value, exists := translations[key]; exists {
+			return value
+		}
+	}
+	return messages[DefaultLanguage][key]
+}
+</file>
+
+<file path="ui/docs/localization.md">
+# NERA Localization
+
+NERA supports English and the Northeast language options exposed in the header:
+
+- Assamese (`as`)
+- Bengali (`bn`)
+- Bodo (`brx`)
+- Khasi (`kha`)
+- Garo (`grt`)
+- Meitei (`mni`)
+- Mizo (`lus`)
+- Ao Naga (`njo`)
+- Nepali (`ne`)
+- Kokborok (`trp`)
+- Nyishi (`inc`)
+
+The language selector is intentionally session-only. Each page reload starts in English. Translation records fall back to English per label when a language does not yet have a reviewed translation for that key.
+
+The selected language is sent to search, geocoding, routing, hazard, and system-status requests. The routing engine normalizes regional values such as `as-IN` to `as`, falls back to English for unsupported values, and returns the normalized language in `Content-Language` and route responses.
+
+External place names and free-form hazard reasons remain source data and are not rewritten by the UI translation layer.
+</file>
+
+<file path="ui/src/components/ReroutePreview.tsx">
+import React from 'react';
+import { Navigation, ShieldAlert, X } from 'lucide-react';
+import { useI18n } from '../i18n';
+
+interface RoutePoint {
+  lat: number;
+  lng: number;
+}
+
+interface ReroutePreviewProps {
+  route: RoutePoint[];
+  hazard: RoutePoint;
+  currentPosition: RoutePoint;
+  onClose: () => void;
+}
+
+export const ReroutePreview: React.FC<ReroutePreviewProps> = ({ route, hazard, currentPosition, onClose }) => {
+  const { t } = useI18n();
+  const points = route.length > 1 ? route : [currentPosition, hazard];
+  const lats = points.map((point) => point.lat);
+  const lngs = points.map((point) => point.lng);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const latSpan = Math.max(maxLat - minLat, 0.001);
+  const lngSpan = Math.max(maxLng - minLng, 0.001);
+  const project = (point: RoutePoint) => `${8 + ((point.lng - minLng) / lngSpan) * 184},${92 - ((point.lat - minLat) / latSpan) * 76}`;
+
+  return (
+    <div className="reroute-preview" role="status" aria-label={t('updatedRoutePreview')}>
+      <div className="reroute-preview-heading">
+        <span><Navigation size={13} /> {t('updatedRoute')}</span>
+        <div className="reroute-preview-actions">
+          <ShieldAlert size={14} color="#f97316" />
+          <button type="button" className="reroute-close-btn" onClick={onClose} aria-label={t('closeRerouteAlert')} title={t('close')}>
+            <X size={14} />
+          </button>
+        </div>
+      </div>
+      <svg className="reroute-preview-map" viewBox="0 0 200 100" aria-hidden="true">
+        <path className="reroute-preview-casing" d={`M ${points.map(project).join(' L ')}`} />
+        <path className="reroute-preview-line" d={`M ${points.map(project).join(' L ')}`} />
+        <circle className="reroute-preview-current" cx={project(currentPosition).split(',')[0]} cy={project(currentPosition).split(',')[1]} r="4" />
+        <circle className="reroute-preview-hazard" cx={project(hazard).split(',')[0]} cy={project(hazard).split(',')[1]} r="4" />
+      </svg>
+      <span className="reroute-preview-caption">{t('diversionAhead')}</span>
+    </div>
+  );
+};
+</file>
+
+<file path="ui/src/services/mockDriveTelemetry.ts">
+import type { MockDriveState } from './mockDriveEngine';
+
+export class MockDriveTelemetry {
+  private socket: WebSocket | null = null;
+  private pendingState: MockDriveState | null = null;
+
+  connect(): void {
+    if (this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return;
+
+    const configuredUrl = import.meta.env.VITE_ROUTING_ENGINE_WS_URL;
+    const url = configuredUrl || `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080/ws/mock-drive`;
+    this.socket = new WebSocket(url);
+    this.socket.addEventListener('open', () => {
+      if (this.pendingState) {
+        this.socket?.send(JSON.stringify(this.pendingState));
+        this.pendingState = null;
+      }
+    });
+    this.socket.addEventListener('error', () => {
+      console.warn('Mock drive telemetry websocket is unavailable');
+    });
+  }
+
+  send(state: MockDriveState): void {
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(state));
+    } else {
+      this.pendingState = state;
+    }
+  }
+
+  close(): void {
+    this.socket?.close();
+    this.socket = null;
+    this.pendingState = null;
+  }
+}
+</file>
+
+<file path="ui/src/i18n.ts">
+import { createContext, createElement, useContext, useEffect, useState, type ReactNode } from 'react';
+
+export type LanguageCode =
+  | 'en'
+  | 'as'
+  | 'bn'
+  | 'brx'
+  | 'kha'
+  | 'grt'
+  | 'mni'
+  | 'lus'
+  | 'njo'
+  | 'ne'
+  | 'trp'
+  | 'inc';
+
+export interface LanguageOption {
+  code: LanguageCode;
+  nativeName: string;
+  englishName: string;
+}
+
+export const LANGUAGES: LanguageOption[] = [
+  { code: 'en', nativeName: 'English', englishName: 'English' },
+  { code: 'as', nativeName: 'অসমীয়া', englishName: 'Assamese' },
+  { code: 'bn', nativeName: 'বাংলা', englishName: 'Bengali' },
+  { code: 'brx', nativeName: 'बड़ो', englishName: 'Bodo' },
+  { code: 'kha', nativeName: 'ಕಾಸಿ', englishName: 'Khasi' },
+  { code: 'grt', nativeName: 'A.chikku', englishName: 'Garo' },
+  { code: 'mni', nativeName: 'মৈতৈলোন্', englishName: 'Meitei' },
+  { code: 'lus', nativeName: 'Mizo', englishName: 'Mizo' },
+  { code: 'njo', nativeName: 'Ao', englishName: 'Ao Naga' },
+  { code: 'ne', nativeName: 'नेपाली', englishName: 'Nepali' },
+  { code: 'trp', nativeName: 'ককবরক', englishName: 'Kokborok' },
+  { code: 'inc', nativeName: 'Nyishi', englishName: 'Nyishi' },
+];
+
+export type TranslationKey =
+  | 'navigator'
+  | 'northEastRouteAnalytics'
+  | 'language'
+  | 'light'
+  | 'dark'
+  | 'active'
+  | 'setKey'
+  | 'configureMapplsKey'
+  | 'startingPoint'
+  | 'destination'
+  | 'currentLocation'
+  | 'getDirections'
+  | 'startMockDriveTest'
+  | 'findingRoute'
+  | 'locationError'
+  | 'startDrive'
+  | 'endDrive'
+  | 'total'
+  | 'estimated'
+  | 'covered'
+  | 'left'
+  | 'heading'
+  | 'resume'
+  | 'pause'
+  | 'exitMockTest'
+  | 'cruisingSpeed'
+  | 'recenter'
+  | 'zoomIn'
+  | 'zoomOut'
+  | 'mapUnavailable'
+  | 'configureKey'
+  | 'switchTo'
+  | 'mode'
+  | 'updatedRoutePreview'
+  | 'updatedRoute'
+  | 'closeRerouteAlert'
+  | 'close'
+  | 'diversionAhead'
+  | 'couldNotCalculateRoute'
+  | 'initializingRoadGraph'
+  | 'coverageHint'
+  | 'calculatingSafeRoute'
+  | 'snappingToRoad'
+  | 'runningPathfinder'
+  | 'evaluatingHazards'
+  | 'routeReady'
+  | 'preparing'
+  | 'aiSafetyAnalysis'
+  | 'avoid'
+  | 'caution'
+  | 'recommendedSafeRoute'
+  | 'validated';
+
+type TranslationSet = Record<TranslationKey, string>;
+
+const english: TranslationSet = {
+  navigator: 'Navigator', northEastRouteAnalytics: 'North East Route Analytics', language: 'Language',
+  light: 'Light', dark: 'Dark', active: 'Active', setKey: 'Set Key', configureMapplsKey: 'Configure Mappls Key',
+  startingPoint: 'Starting point', destination: 'Destination', currentLocation: 'Current Location',
+  getDirections: 'Get Directions', startMockDriveTest: 'Start Mock Drive Test', findingRoute: 'Finding route...',
+  locationError: 'Choose a location from the suggestions or enter a more specific place name.',
+  startDrive: 'Start Drive', endDrive: 'End Drive', total: 'total', estimated: 'est.', covered: 'covered',
+  left: 'left', heading: 'heading', resume: 'Resume', pause: 'Pause', exitMockTest: 'Exit Mock Test',
+  cruisingSpeed: 'Cruising Speed', recenter: 'Recenter', zoomIn: 'Zoom in', zoomOut: 'Zoom out',
+  mapUnavailable: 'Map Unavailable', configureKey: 'Configure Key', switchTo: 'Switch to', mode: 'mode',
+  updatedRoutePreview: 'Updated route preview', updatedRoute: 'Updated route',
+  closeRerouteAlert: 'Close reroute alert', close: 'Close', diversionAhead: 'Diversion ahead at Nongpoh',
+  couldNotCalculateRoute: 'Could not calculate directions between points.',
+  initializingRoadGraph: 'Initializing NER Road Graph', coverageHint: '8-state NER coverage · first-time setup',
+  calculatingSafeRoute: 'Calculating Safe Route', snappingToRoad: 'Snapping to nearest road…',
+  runningPathfinder: 'Running A* pathfinder…', evaluatingHazards: 'Evaluating hazard zones…',
+  routeReady: 'Route ready!', preparing: 'Preparing…', aiSafetyAnalysis: 'AI Safety Analysis',
+  avoid: 'Avoid', caution: 'Caution', recommendedSafeRoute: 'Recommended Safe Route', validated: 'Validated',
+};
+
+const translated: Partial<Record<LanguageCode, Partial<TranslationSet>>> = {
+  as: { navigator: 'নেভিগেটৰ', northEastRouteAnalytics: 'উত্তৰ-পূব পথ বিশ্লেষণ', language: 'ভাষা', light: 'পোহৰ', dark: 'আন্ধাৰ', active: 'সক্ৰিয়', setKey: 'কি ছেট কৰক', startingPoint: 'আৰম্ভণিৰ স্থান', destination: 'গন্তব্য', currentLocation: 'বৰ্তমান অৱস্থান', getDirections: 'দিশ নিৰ্ধাৰণ কৰক', findingRoute: 'পথ বিচাৰি আছে...', startDrive: 'যাত্ৰা আৰম্ভ', endDrive: 'যাত্ৰা শেষ', total: 'মুঠ', estimated: 'আনুমানিক', covered: 'অতিক্ৰম', left: 'বাকী', heading: 'দিশ', resume: 'পুনৰ আৰম্ভ', pause: 'বিৰতি', cruisingSpeed: 'গতি', recenter: 'পুনৰ কেন্দ্ৰীভূত', zoomIn: 'ডাঙৰ কৰক', zoomOut: 'সৰু কৰক' },
+  bn: { navigator: 'ন্যাভিগেটর', northEastRouteAnalytics: 'উত্তর-পূর্ব রুট বিশ্লেষণ', language: 'ভাষা', light: 'আলো', dark: 'অন্ধকার', active: 'সক্রিয়', setKey: 'কী সেট করুন', startingPoint: 'শুরুর স্থান', destination: 'গন্তব্য', currentLocation: 'বর্তমান অবস্থান', getDirections: 'দিকনির্দেশ পান', findingRoute: 'রুট খোঁজা হচ্ছে...', startDrive: 'ড্রাইভ শুরু', endDrive: 'ড্রাইভ শেষ', total: 'মোট', estimated: 'আনুমানিক', covered: 'অতিক্রান্ত', left: 'বাকি', heading: 'দিক', resume: 'আবার শুরু', pause: 'বিরতি', cruisingSpeed: 'গতি', recenter: 'কেন্দ্রে আনুন', zoomIn: 'বড় করুন', zoomOut: 'ছোট করুন' },
+  ne: { navigator: 'नेभिगेटर', northEastRouteAnalytics: 'उत्तर पूर्व मार्ग विश्लेषण', language: 'भाषा', light: 'उज्यालो', dark: 'अँध्यारो', active: 'सक्रिय', setKey: 'की सेट गर्नुहोस्', startingPoint: 'सुरुवाती स्थान', destination: 'गन्तव्य', currentLocation: 'हालको स्थान', getDirections: 'दिशा पाउनुहोस्', findingRoute: 'मार्ग खोजिँदैछ...', startDrive: 'ड्राइभ सुरु', endDrive: 'ड्राइभ अन्त्य', total: 'जम्मा', estimated: 'अनुमानित', covered: 'पार गरिएको', left: 'बाँकी', heading: 'दिशा', resume: 'पुनः सुरु', pause: 'रोक्नुहोस्', cruisingSpeed: 'गति', recenter: 'केन्द्रमा ल्याउनुहोस्', zoomIn: 'ठूलो बनाउनुहोस्', zoomOut: 'सानो बनाउनुहोस्' },
+  mni: { navigator: 'ꯅꯦꯕꯤꯒꯦꯇꯔ', language: 'ꯂꯣꯟ', startingPoint: 'ꯍꯧꯖꯤꯛꯀꯤ ꯐꯝ', destination: 'ꯂꯛꯄꯗꯤ', getDirections: 'ꯃꯥꯔꯒ ꯐꯪꯕꯤꯌꯨ', startDrive: 'ꯆꯠꯄ ꯍꯧꯕ', endDrive: 'ꯆꯠꯄ ꯂꯣꯏꯕ', pause: 'ꯍꯪꯕ', resume: 'ꯍꯧꯗꯣꯛꯄ' },
+  lus: { navigator: 'Khawchhuah', language: 'Ṭawng', startingPoint: 'Hmalakna hmun', destination: 'Thlenna hmun', getDirections: 'Kawng hriatna', startDrive: 'Kal tan', endDrive: 'Kal tawp', pause: 'Tawp chhung', resume: 'Tir leh' },
+  trp: { navigator: 'ন্যাভিগেটর', language: 'রওং', startingPoint: 'ফাংনা থাং', destination: 'থাংমুন', getDirections: 'থাং হাবায়', startMockDriveTest: 'মক ড্রাইভ শুরু', startDrive: 'যাত্রা হাবায়', endDrive: 'যাত্রা থামায়' },
+  brx: { navigator: 'नेभिगेटर', language: 'राव', startingPoint: 'जागोनाय जायगा', destination: 'फैजायगोन', getDirections: 'दिगोनाय', startDrive: 'ड्राइभ जागोन', endDrive: 'ड्राइभ बन्द', pause: 'फोसाब', resume: 'फिन जागोन' },
+  kha: { navigator: 'Nongleit', language: 'Ktien', startingPoint: 'Ka jaka sdang', destination: 'Ka jaka poi', getDirections: 'Pyni ia ka lynti', startDrive: 'Sdang ia ka jingleit', endDrive: 'Pynkut ia ka jingleit', pause: 'Sangeh', resume: 'Sdang biang' },
+  grt: { navigator: 'Nokgiparang', language: 'Ku∙sik', startingPoint: 'A∙bachenggipa biap', destination: 'Sokani biap', getDirections: 'Re∙angani ramram', startDrive: 'Re∙ang dakchak', endDrive: 'Re∙ang bonata', pause: 'Dongchak', resume: 'Kene re∙ang' },
+  njo: { navigator: 'Nokinkettsür', language: 'Oshi', startingPoint: 'Areni otsü', destination: 'Areni tsür', getDirections: 'Otsü sayu', startDrive: 'Otsü tenzük', endDrive: 'Otsü temzüker', pause: 'Atsü', resume: 'Kene tenzük' },
+  inc: { navigator: 'Nehvigeitor', language: 'Acho', startingPoint: 'Acho nyi', destination: 'Acho pyi', getDirections: 'Lam apuk', startDrive: 'Lam nyi', endDrive: 'Lam pyi', pause: 'Tali', resume: 'Tali nyi' },
+};
+
+export const getTranslations = (language: LanguageCode): TranslationSet => ({
+  ...english,
+  ...(translated[language] || {}),
+});
+
+export interface I18nValue {
+  language: LanguageCode;
+  setLanguage: (language: LanguageCode) => void;
+  t: (key: TranslationKey) => string;
+}
+
+export const I18nContext = createContext<I18nValue | null>(null);
+
+export const I18nProvider = ({ children }: { children: ReactNode }) => {
+  const [language, setLanguage] = useState<LanguageCode>('en');
+  const translations = getTranslations(language);
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+  }, [language]);
+
+  return createElement(
+    I18nContext.Provider,
+    { value: { language, setLanguage, t: (key) => translations[key] } },
+    children,
+  );
+};
+
+export const useI18n = (): I18nValue => {
+  const value = useContext(I18nContext);
+  if (!value) throw new Error('useI18n must be used inside I18nContext.Provider');
+  return value;
+};
+</file>
 
 <file path=".github/workflows/ci.yml">
 name: CI
@@ -633,6 +1159,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"routing-engine/internal/localization"
 	"routing-engine/internal/models"
 	"routing-engine/internal/services/hazard"
 )
@@ -654,6 +1181,7 @@ func HazardHandler(svc *hazard.Service) http.HandlerFunc {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		w.Header().Set("Content-Language", localization.FromRequest(r))
 
 		hazards := svc.GetActiveHazards()
 		if hazards == nil {
@@ -676,6 +1204,7 @@ import (
 	"os"
 	"strings"
 
+	"routing-engine/internal/localization"
 	"routing-engine/internal/services/routing"
 )
 
@@ -695,6 +1224,8 @@ func RouteHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	language := localization.FromRequest(r)
+	w.Header().Set("Content-Language", language)
 
 	waypoints := r.URL.Query().Get("waypoints")
 	profile := r.URL.Query().Get("profile")
@@ -703,7 +1234,7 @@ func RouteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if waypoints == "" {
-		http.Error(w, "Missing waypoints", http.StatusBadRequest)
+		http.Error(w, localization.Message(language, "missing_waypoints"), http.StatusBadRequest)
 		return
 	}
 
@@ -717,14 +1248,15 @@ func RouteHandler(w http.ResponseWriter, r *http.Request) {
 	result, err := routing.FetchRoute(waypoints, profile, token, nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "no route found") {
-			http.Error(w, "No route found", http.StatusNotFound)
+			http.Error(w, localization.Message(language, "route_not_found"), http.StatusNotFound)
 		} else {
-			http.Error(w, "Failed to process route", http.StatusBadGateway)
+			http.Error(w, localization.Message(language, "route_failed"), http.StatusBadGateway)
 		}
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	result.Language = language
 	json.NewEncoder(w).Encode(result)
 }
 </file>
@@ -772,6 +1304,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"routing-engine/internal/localization"
 	"routing-engine/internal/services/startup"
 )
 
@@ -788,6 +1321,7 @@ func StatusHandler(manager *startup.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Language", localization.FromRequest(r))
 
 		state, msg, pct, meta := manager.GetStatus()
 
@@ -1017,6 +1551,7 @@ type RouteResult struct {
 	Polyline    string       `json:"polyline"`
 	Coordinates []Coordinate `json:"coordinates"`
 	Steps       []RouteStep  `json:"steps"`
+	Language    string       `json:"language,omitempty"`
 }
 
 type RouteStep struct {
@@ -1038,6 +1573,7 @@ type SafeRouteResponse struct {
 	AlternateSafeRoute *RouteResult         `json:"alternate_safe_route,omitempty"`
 	AvoidedHazards     []HazardIntersection `json:"avoided_hazards"`
 	SelectionReason    string               `json:"selection_reason,omitempty"`
+	Language           string               `json:"language,omitempty"`
 }
 </file>
 
@@ -1111,235 +1647,6 @@ func TestRoadGraphPOC(t *testing.T) {
 }
 </file>
 
-<file path="Routing Engine/internal/poc/graph/graph.go">
-package graph
-
-import (
-	"container/heap"
-	"errors"
-	"math"
-)
-
-// Edge represents a road segment connecting two nodes.
-type Edge struct {
-	ID     string
-	From   int32
-	To     int32
-	Weight float64
-}
-
-// Coordinate represents a geographic point.
-type Coordinate struct {
-	Lat float64
-	Lon float64
-}
-
-// Graph represents the in-memory road network.
-type Graph struct {
-	Nodes      [][]Edge
-	NodeCoords []Coordinate
-
-	OSMToInternal map[int64]int32
-	InternalToOSM []int64
-}
-
-// NewGraph initializes a new empty graph.
-func NewGraph() *Graph {
-	return &Graph{
-		Nodes:         make([][]Edge, 0),
-		NodeCoords:    make([]Coordinate, 0),
-		OSMToInternal: make(map[int64]int32),
-		InternalToOSM: make([]int64, 0),
-	}
-}
-
-// GetOrAddNode maps an OSM node ID to an internal int32 ID.
-func (g *Graph) GetOrAddNode(osmID int64) int32 {
-	if internalID, exists := g.OSMToInternal[osmID]; exists {
-		return internalID
-	}
-	internalID := int32(len(g.InternalToOSM))
-	g.OSMToInternal[osmID] = internalID
-	g.InternalToOSM = append(g.InternalToOSM, osmID)
-
-	// Pre-allocate slots
-	g.Nodes = append(g.Nodes, nil)
-	g.NodeCoords = append(g.NodeCoords, Coordinate{})
-
-	return internalID
-}
-
-// AddEdge adds a directed edge to the graph.
-func (g *Graph) AddEdge(id string, from, to int32, weight float64) {
-	g.Nodes[from] = append(g.Nodes[from], Edge{
-		ID:     id,
-		From:   from,
-		To:     to,
-		Weight: weight,
-	})
-}
-
-// SetNodeCoord saves the physical coordinates of a node.
-func (g *Graph) SetNodeCoord(id int32, lat, lon float64) {
-	g.NodeCoords[id] = Coordinate{Lat: lat, Lon: lon}
-}
-
-// isBlocked checks if an edge ID is in the blocked list.
-func isBlocked(id string, blockedIDs []string) bool {
-	for _, bID := range blockedIDs {
-		if id == bID {
-			return true
-		}
-	}
-	return false
-}
-
-// PriorityQueue implementation for A* algorithm.
-type Item struct {
-	nodeID   int32
-	priority float64
-	gCost    float64
-	index    int
-}
-
-type PriorityQueue []*Item
-
-func (pq PriorityQueue) Len() int { return len(pq) }
-
-func (pq PriorityQueue) Less(i, j int) bool {
-	return pq[i].priority < pq[j].priority
-}
-
-func (pq PriorityQueue) Swap(i, j int) {
-	pq[i], pq[j] = pq[j], pq[i]
-	pq[i].index = i
-	pq[j].index = j
-}
-
-func (pq *PriorityQueue) Push(x interface{}) {
-	n := len(*pq)
-	item := x.(*Item)
-	item.index = n
-	*pq = append(*pq, item)
-}
-
-func (pq *PriorityQueue) Pop() interface{} {
-	old := *pq
-	n := len(old)
-	item := old[n-1]
-	old[n-1] = nil  // avoid memory leak
-	item.index = -1 // for safety
-	*pq = old[0 : n-1]
-	return item
-}
-
-// PathResult represents the output of the shortest path algorithm.
-type PathResult struct {
-	Edges       []Edge
-	TotalWeight float64
-}
-
-// FindShortestPath uses A* algorithm to find the shortest path from start to end,
-// ignoring any edges whose IDs are present in blockedSegmentIDs.
-func (g *Graph) FindShortestPath(start, end int32, blockedSegmentIDs []string) (*PathResult, error) {
-	if int(end) >= len(g.NodeCoords) || int(start) >= len(g.NodeCoords) {
-		return nil, errors.New("node coordinates not found")
-	}
-	endCoord := g.NodeCoords[end]
-
-	numNodes := len(g.Nodes)
-	dist := make([]float64, numNodes)
-	prev := make([]*Edge, numNodes)
-
-	// Initialize distances to infinity
-	for i := 0; i < numNodes; i++ {
-		dist[i] = 1e9 // conceptually infinity
-	}
-	dist[start] = 0
-
-	pq := make(PriorityQueue, 0)
-	heap.Init(&pq)
-
-	startCoord := g.NodeCoords[start]
-	hStart := haversineDistanceM(startCoord.Lat, startCoord.Lon, endCoord.Lat, endCoord.Lon)
-	heap.Push(&pq, &Item{nodeID: start, priority: hStart, gCost: 0})
-
-	for pq.Len() > 0 {
-		curr := heap.Pop(&pq).(*Item)
-
-		// Optimization: if we reached the end, we can stop
-		if curr.nodeID == end {
-			break
-		}
-
-		// It's possible we found a better path before popping this item
-		if curr.gCost > dist[curr.nodeID] {
-			continue
-		}
-
-		for i := range g.Nodes[curr.nodeID] {
-			edge := &g.Nodes[curr.nodeID][i]
-			if isBlocked(edge.ID, blockedSegmentIDs) {
-				continue
-			}
-
-			newDist := curr.gCost + edge.Weight
-			if newDist < dist[edge.To] {
-				dist[edge.To] = newDist
-				prev[edge.To] = edge
-
-				toCoord := g.NodeCoords[edge.To]
-				h := haversineDistanceM(toCoord.Lat, toCoord.Lon, endCoord.Lat, endCoord.Lon)
-				heap.Push(&pq, &Item{nodeID: edge.To, priority: newDist + h, gCost: newDist})
-			}
-		}
-	}
-
-	if dist[end] >= 1e9 {
-		return nil, errors.New("no route found")
-	}
-
-	// Reconstruct path by walking backwards: Destination -> predecessor -> Start
-	var path []Edge
-	currNode := end
-	for currNode != start {
-		e := prev[currNode]
-		if e == nil {
-			return nil, errors.New("broken path during reconstruction: no predecessor found")
-		}
-		path = append(path, *e)
-		currNode = e.From
-	}
-
-	// Reverse the path to get Start -> Destination order
-	for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
-		path[i], path[j] = path[j], path[i]
-	}
-
-	return &PathResult{
-		Edges:       path,
-		TotalWeight: dist[end],
-	}, nil
-}
-
-// Simple haversine implementation to avoid circular imports if any
-func haversineDistanceM(lat1, lon1, lat2, lon2 float64) float64 {
-	const R = 6371000 // Earth radius in meters
-
-	phi1 := lat1 * math.Pi / 180
-	phi2 := lat2 * math.Pi / 180
-	deltaPhi := (lat2 - lat1) * math.Pi / 180
-	deltaLambda := (lon2 - lon1) * math.Pi / 180
-
-	a := math.Sin(deltaPhi/2)*math.Sin(deltaPhi/2) +
-		math.Cos(phi1)*math.Cos(phi2)*
-			math.Sin(deltaLambda/2)*math.Sin(deltaLambda/2)
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-
-	return R * c
-}
-</file>
-
 <file path="Routing Engine/internal/poc/graph/metadata.go">
 package graph
 
@@ -1407,47 +1714,6 @@ func (m *GraphMetadata) IsCompleteNER() bool {
 }
 </file>
 
-<file path="Routing Engine/internal/poc/graph/store.go">
-package graph
-
-import (
-	"encoding/gob"
-	"fmt"
-	"os"
-)
-
-// SaveToFile serializes the Graph to a gob file.
-func (g *Graph) SaveToFile(filepath string) error {
-	file, err := os.Create(filepath)
-	if err != nil {
-		return fmt.Errorf("could not create file %s: %w", filepath, err)
-	}
-	defer file.Close()
-
-	encoder := gob.NewEncoder(file)
-	if err := encoder.Encode(g); err != nil {
-		return fmt.Errorf("failed to encode graph: %w", err)
-	}
-	return nil
-}
-
-// LoadFromFile deserializes the Graph from a gob file.
-func LoadFromFile(filepath string) (*Graph, error) {
-	file, err := os.Open(filepath)
-	if err != nil {
-		return nil, fmt.Errorf("could not open file %s: %w", filepath, err)
-	}
-	defer file.Close()
-
-	var g Graph
-	decoder := gob.NewDecoder(file)
-	if err := decoder.Decode(&g); err != nil {
-		return nil, fmt.Errorf("failed to decode graph: %w", err)
-	}
-	return &g, nil
-}
-</file>
-
 <file path="Routing Engine/internal/poc/osm/converter.go">
 package osm
 
@@ -1502,48 +1768,6 @@ func ConvertPathToGeometry(g *graph.Graph, path *graph.PathResult) *GraphRouteRe
 		Coordinates: coords,
 		DistanceM:   path.TotalWeight, // In our POC, TotalWeight is strictly physical distance in meters
 	}
-}
-</file>
-
-<file path="Routing Engine/internal/poc/osm/nearest.go">
-package osm
-
-import (
-	"errors"
-	"routing-engine/internal/models"
-	"routing-engine/internal/poc/graph"
-	"routing-engine/internal/utils"
-)
-
-// FindNearestNode searches the graph for the closest physical drivable node to a target coordinate.
-func FindNearestNode(g *graph.Graph, target models.Coordinate, maxSnapDistanceM float64) (int32, float64, error) {
-	if g == nil || len(g.NodeCoords) == 0 {
-		return -1, 0, errors.New("empty graph")
-	}
-
-	var bestNodeID int32 = -1
-	minDistance := -1.0
-
-	// Iterate over the flat array of coordinates (extremely fast)
-	for i, coords := range g.NodeCoords {
-		// Only snap to nodes that have outgoing edges (so we can actually start a route from there)
-		if len(g.Nodes[i]) == 0 {
-			continue
-		}
-
-		dist := utils.HaversineDistanceM(coords.Lat, coords.Lon, target.Lat, target.Lng)
-
-		if minDistance == -1.0 || dist < minDistance {
-			minDistance = dist
-			bestNodeID = int32(i)
-		}
-	}
-
-	if bestNodeID == -1 || minDistance > maxSnapDistanceM {
-		return -1, minDistance, errors.New("no drivable road found within snap distance")
-	}
-
-	return bestNodeID, minDistance, nil
 }
 </file>
 
@@ -17782,6 +18006,7 @@ import { Shield, AlertTriangle, AlertOctagon, ChevronDown, ChevronUp } from 'luc
 import type { RiskAssessment } from '../services/riskEngine';
 import { formatDistance, formatDuration } from '../services/mapplsRouteService';
 import type { RouteResult } from '../services/mapplsRouteService';
+import { useI18n } from '../i18n';
 
 interface AvoidedAreasCardProps {
   assessments: RiskAssessment[];
@@ -17798,6 +18023,7 @@ export const AvoidedAreasCard: React.FC<AvoidedAreasCardProps> = ({
   bypassUsed,
   isValidated,
 }) => {
+  const { t } = useI18n();
   const [isExpanded, setIsExpanded] = React.useState(true);
 
   const avoidAreas = assessments.filter(a => a.risk_class === 'AVOID');
@@ -17815,13 +18041,13 @@ export const AvoidedAreasCard: React.FC<AvoidedAreasCardProps> = ({
       <div className="avoided-header" onClick={() => setIsExpanded(prev => !prev)}>
         <div className="avoided-title-row">
           <Shield size={16} className="avoided-shield-icon" />
-          <span className="avoided-title">AI Safety Analysis</span>
+          <span className="avoided-title">{t('aiSafetyAnalysis')}</span>
           <span className="avoided-badge-count">
             {avoidAreas.length > 0 && (
-              <span className="badge-avoid">{avoidAreas.length} Avoid</span>
+              <span className="badge-avoid">{avoidAreas.length} {t('avoid')}</span>
             )}
             {cautionAreas.length > 0 && (
-              <span className="badge-caution">{cautionAreas.length} Caution</span>
+              <span className="badge-caution">{cautionAreas.length} {t('caution')}</span>
             )}
           </span>
         </div>
@@ -17837,8 +18063,8 @@ export const AvoidedAreasCard: React.FC<AvoidedAreasCardProps> = ({
             <div className="safe-route-stats">
               <div className="safe-route-label">
                 <span className="orange-dot" />
-                Recommended Safe Route
-                {isValidated && <span className="validated-badge">✓ Validated</span>}
+                {t('recommendedSafeRoute')}
+                {isValidated && <span className="validated-badge">✓ {t('validated')}</span>}
               </div>
               <div className="safe-route-numbers">
                 <span>{formatDistance(safeRoute.distance)}</span>
@@ -17898,6 +18124,7 @@ export const AvoidedAreasCard: React.FC<AvoidedAreasCardProps> = ({
 <file path="ui/src/components/Header.tsx">
 import React from 'react';
 import { Navigation, Moon, Sun, Key } from 'lucide-react';
+import { LANGUAGES, useI18n } from '../i18n';
 
 interface HeaderProps {
   token: string;
@@ -17909,7 +18136,15 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   token, theme, onToggleTheme, onOpenTokenModal,
 }) => (
-  <header className="nav-header">
+  <HeaderContent token={token} theme={theme} onToggleTheme={onToggleTheme} onOpenTokenModal={onOpenTokenModal} />
+);
+
+const HeaderContent: React.FC<HeaderProps> = ({
+  token, theme, onToggleTheme, onOpenTokenModal,
+}) => {
+  const { language, setLanguage, t } = useI18n();
+
+  return <header className="nav-header">
     <div className="header-brand">
       <div className="brand-logo">
         <Navigation size={16} />
@@ -17917,43 +18152,54 @@ export const Header: React.FC<HeaderProps> = ({
       <div>
         <div className="brand-title-line">
           <span className="brand-name">NERA</span>
-          <span className="brand-badge">Navigator</span>
+          <span className="brand-badge">{t('navigator')}</span>
         </div>
-        <p className="brand-sub">North East Route Analytics</p>
+        <p className="brand-sub">{t('northEastRouteAnalytics')}</p>
       </div>
     </div>
 
     <div className="header-right-tools">
+      <label className="language-selector">
+        <span className="sr-only">{t('language')}</span>
+        <select aria-label={t('language')} value={language} onChange={(event) => setLanguage(event.target.value as typeof language)}>
+          {LANGUAGES.map((option) => (
+            <option key={option.code} value={option.code}>{option.nativeName}</option>
+          ))}
+        </select>
+      </label>
       <button className="theme-toggle-pill" onClick={onToggleTheme}
-        title={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} mode`}>
+        title={`${t('switchTo')} ${theme === 'dark' ? t('light') : t('dark')} ${t('mode')}`}>
         {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
-        <span>{theme === 'dark' ? 'Light' : 'Dark'}</span>
+        <span>{theme === 'dark' ? t('light') : t('dark')}</span>
       </button>
       <button className={`token-badge-btn ${token ? 'valid' : ''}`}
-        onClick={onOpenTokenModal} title="Configure Mappls Key">
+        onClick={onOpenTokenModal} title={t('configureMapplsKey')}>
         <Key size={13} />
-        <span>{token ? 'Active' : 'Set Key'}</span>
+        <span>{token ? t('active') : t('setKey')}</span>
         <span className={`status-indicator ${token ? 'online' : 'offline'}`} />
       </button>
     </div>
   </header>
-);
+};
 </file>
 
 <file path="ui/src/components/MockDriveControls.tsx">
 import React from 'react';
 import { Play } from 'lucide-react';
+import { useI18n } from '../i18n';
 
 interface MockDriveControlsProps {
   onStart: () => void;
 }
 
 export const MockDriveControls: React.FC<MockDriveControlsProps> = ({ onStart }) => {
+  const { t } = useI18n();
+
   return (
     <div className="mock-drive-panel-simple">
       <button className="mock-drive-start-btn" onClick={onStart}>
         <Play size={16} fill="currentColor" />
-        Start Mock Drive Test
+        {t('startMockDriveTest')}
       </button>
     </div>
   );
@@ -17965,6 +18211,7 @@ import React, { useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Play, Pause, Square } from 'lucide-react';
 import { formatDistance } from '../services/mapplsRouteService';
+import { useI18n } from '../i18n';
 
 interface MockDriveHUDProps {
   isPaused: boolean;
@@ -17994,6 +18241,7 @@ export const MockDriveHUD: React.FC<MockDriveHUDProps> = ({
   onStop,
   onSpeedChange,
 }) => {
+  const { t } = useI18n();
   const dialRef = useRef<SVGSVGElement>(null);
   const [isDragging, setIsDragging] = useState(false);
 
@@ -18067,29 +18315,29 @@ export const MockDriveHUD: React.FC<MockDriveHUDProps> = ({
             </div>
             <div className="hud-stat-item">
               <span className="hud-stat-val">{formatDistance(distanceCoveredM)}</span>
-              <span className="hud-stat-unit">covered</span>
+              <span className="hud-stat-unit">{t('covered')}</span>
             </div>
             <div className="hud-stat-item">
               <span className="hud-stat-val">{formatDistance(totalDistanceM - distanceCoveredM)}</span>
-              <span className="hud-stat-unit">left</span>
+              <span className="hud-stat-unit">{t('left')}</span>
             </div>
             <div className="hud-stat-item">
               <span className="hud-stat-val">{currentBearing}°</span>
-              <span className="hud-stat-unit">heading</span>
+              <span className="hud-stat-unit">{t('heading')}</span>
             </div>
           </div>
 
           <div className="hud-actions">
             {isPaused ? (
-              <button className="hud-action-btn" onClick={onResume} title="Resume">
+              <button className="hud-action-btn" onClick={onResume} title={t('resume')}>
                 <Play size={16} fill="currentColor" />
               </button>
             ) : (
-              <button className="hud-action-btn" onClick={onPause} title="Pause">
+              <button className="hud-action-btn" onClick={onPause} title={t('pause')}>
                 <Pause size={16} fill="currentColor" />
               </button>
             )}
-            <button className="hud-action-btn stop" onClick={onStop} title="Exit Mock Test">
+            <button className="hud-action-btn stop" onClick={onStop} title={t('exitMockTest')}>
               <Square size={16} fill="currentColor" />
             </button>
           </div>
@@ -18204,7 +18452,7 @@ export const MockDriveHUD: React.FC<MockDriveHUDProps> = ({
               <circle cx="0" cy="0" r="7" fill="#ffffff" filter="url(#dial-glow)" />
             </g>
           </svg>
-          <div className="speed-dial-title">Cruising Speed</div>
+          <div className="speed-dial-title">{t('cruisingSpeed')}</div>
         </div>
       </motion.div>
     </>
@@ -18217,6 +18465,7 @@ import React, { useEffect, useState } from 'react';
 import { Database, Route, Loader2, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { fetchSystemStatus } from '../services/mapplsRouteService';
 import type { SystemStatus } from '../services/mapplsRouteService';
+import { useI18n } from '../i18n';
 
 interface RouteProgressBarProps {
   isLoadingRoute: boolean;
@@ -18233,6 +18482,7 @@ const STAGE_CONFIG: Record<string, { icon: React.ReactNode; label: string; color
 };
 
 export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRoute }) => {
+  const { language, t } = useI18n();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [routePhase, setRoutePhase] = useState<'idle' | 'snapping' | 'pathfinding' | 'hazards' | 'done'>('idle');
   const [routePct, setRoutePct] = useState(0);
@@ -18244,7 +18494,7 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRou
     let mounted = true;
 
     const poll = async () => {
-      const s = await fetchSystemStatus();
+      const s = await fetchSystemStatus(language);
       if (!mounted) return;
       setStatus(s);
       if (s && s.state !== 'ready' && s.state !== 'error') {
@@ -18256,7 +18506,7 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRou
     interval = setInterval(poll, 1500);
 
     return () => { mounted = false; clearInterval(interval); };
-  }, []);
+  }, [language]);
 
   // Simulate route calculation phases when isLoadingRoute is true
   useEffect(() => {
@@ -18303,7 +18553,7 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRou
         <div className="route-progress-card">
           <div className="rp-header">
             <Database size={18} className="rp-header-icon" />
-            <span className="rp-title">Initializing NER Road Graph</span>
+            <span className="rp-title">{t('initializingRoadGraph')}</span>
           </div>
           <div className="rp-stage-row">
             <span className="rp-stage-icon" style={{ color: cfg.color }}>{cfg.icon}</span>
@@ -18317,7 +18567,7 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRou
           </div>
           <div className="rp-meta">
             <span className="rp-pct">{Math.round(pct)}%</span>
-            <span className="rp-hint">8-state NER coverage · first-time setup</span>
+            <span className="rp-hint">{t('coverageHint')}</span>
           </div>
         </div>
       </div>
@@ -18326,10 +18576,8 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRou
 
   // Route calculation mode
   const routeLabels: Record<string, string> = {
-    snapping: 'Snapping to nearest road…',
-    pathfinding: 'Running A* pathfinder…',
-    hazards: 'Evaluating hazard zones…',
-    done: 'Route ready!',
+    snapping: t('snappingToRoad'), pathfinding: t('runningPathfinder'),
+    hazards: t('evaluatingHazards'), done: t('routeReady'),
   };
 
   const routeColors: Record<string, string> = {
@@ -18344,13 +18592,13 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRou
       <div className="route-progress-card route-progress-compact">
         <div className="rp-header">
           <Route size={16} className="rp-header-icon" />
-          <span className="rp-title">Calculating Safe Route</span>
+          <span className="rp-title">{t('calculatingSafeRoute')}</span>
         </div>
         <div className="rp-stage-row">
           <span className="rp-stage-icon" style={{ color: routeColors[routePhase] || '#a78bfa' }}>
             {routePhase === 'done' ? <CheckCircle2 size={14} /> : <Loader2 size={14} className="spin" />}
           </span>
-          <span className="rp-stage-label">{routeLabels[routePhase] || 'Preparing…'}</span>
+          <span className="rp-stage-label">{routeLabels[routePhase] || t('preparing')}</span>
         </div>
         <div className="rp-bar-track">
           <div
@@ -18386,6 +18634,7 @@ import {
 } from 'lucide-react';
 import { fetchAutosuggest, geocodePlace } from '../services/mapplsRouteService';
 import type { PlaceSuggestion } from '../services/mapplsRouteService';
+import { useI18n } from '../i18n';
 
 export interface LocationPoint {
   name: string;
@@ -18407,6 +18656,7 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
   token, origin, destination, isLoadingRoute,
   onSetOrigin, onSetDestination, onCalculateRoute,
 }) => {
+  const { language, t } = useI18n();
   const [oText, setOText] = useState(origin?.name || '');
   const [dText, setDText] = useState(destination?.name || '');
   const [oSug, setOSug] = useState<PlaceSuggestion[]>([]);
@@ -18432,30 +18682,30 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
     if (!oText || oText === origin?.name || oText.trim().length < 2) { setOSug([]); return; }
     const t = setTimeout(async () => {
       setSearchO(true);
-      setOSug(await fetchAutosuggest(oText, token));
+      setOSug(await fetchAutosuggest(oText, token, undefined, language));
       setSearchO(false);
       setDrop('o');
     }, 220);
     return () => clearTimeout(t);
-  }, [oText, origin, token]);
+  }, [oText, origin, token, language]);
 
   // Dest autosuggest
   useEffect(() => {
     if (!dText || dText === destination?.name || dText.trim().length < 2) { setDSug([]); return; }
     const t = setTimeout(async () => {
       setSearchD(true);
-      setDSug(await fetchAutosuggest(dText, token, origin ? { lat: origin.lat, lng: origin.lng } : undefined));
+      setDSug(await fetchAutosuggest(dText, token, origin ? { lat: origin.lat, lng: origin.lng } : undefined, language));
       setSearchD(false);
       setDrop('d');
     }, 220);
     return () => clearTimeout(t);
-  }, [dText, destination, origin, token]);
+  }, [dText, destination, origin, token, language]);
 
   const pick = async (item: PlaceSuggestion, tgt: 'o' | 'd') => {
     let lat = item.latitude, lng = item.longitude;
     if (!lat || !lng) {
       setResolving(true);
-      const g = await geocodePlace(`${item.placeName}, ${item.placeAddress}`, token);
+      const g = await geocodePlace(`${item.placeName}, ${item.placeAddress}`, token, language);
       setResolving(false);
       if (g) { lat = g.lat; lng = g.lng; }
     }
@@ -18476,7 +18726,7 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
     if (!navigator.geolocation) return;
     setGpsing(true);
     navigator.geolocation.getCurrentPosition(
-      p => { setGpsing(false); const pt: LocationPoint = { name: 'Current Location', lat: p.coords.latitude, lng: p.coords.longitude }; setOText(pt.name); onSetOrigin(pt); },
+      p => { setGpsing(false); const pt: LocationPoint = { name: t('currentLocation'), lat: p.coords.latitude, lng: p.coords.longitude }; setOText(pt.name); onSetOrigin(pt); },
       () => { setGpsing(false); const fb: LocationPoint = { name: 'Guwahati, Assam', lat: 26.1445, lng: 91.7362 }; setOText(fb.name); onSetOrigin(fb); },
       { timeout: 8000, enableHighAccuracy: true }
     );
@@ -18489,11 +18739,11 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
     setResolving(true);
     try {
       if ((!ao || ao.name !== oText) && oText.trim()) {
-        const g = await geocodePlace(oText, token);
+        const g = await geocodePlace(oText, token, language);
         if (g) { ao = { name: oText, lat: g.lat, lng: g.lng }; onSetOrigin(ao); }
       }
       if ((!ad || ad.name !== dText) && dText.trim()) {
-        const g = await geocodePlace(dText, token);
+        const g = await geocodePlace(dText, token, language);
         if (g) { ad = { name: dText, lat: g.lat, lng: g.lng }; onSetDestination(ad); }
       }
     } finally { setResolving(false); }
@@ -18515,7 +18765,7 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
         <div className="search-row">
           <span className="marker-dot origin">A</span>
           <div className="search-input-wrap">
-            <input placeholder="Starting point" value={oText}
+            <input placeholder={t('startingPoint')} value={oText}
               onChange={e => setOText(e.target.value)}
               onFocus={() => oSug.length && setDrop('o')}
               onKeyDown={e => e.key === 'Enter' && submit()} />
@@ -18550,7 +18800,7 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
         <div className="search-row">
           <span className="marker-dot dest">B</span>
           <div className="search-input-wrap">
-            <input placeholder="Destination" value={dText}
+            <input placeholder={t('destination')} value={dText}
               onChange={e => setDText(e.target.value)}
               onFocus={() => dSug.length && setDrop('d')}
               onKeyDown={e => e.key === 'Enter' && submit()} />
@@ -18574,7 +18824,7 @@ export const RouteSearchBox: React.FC<RouteSearchBoxProps> = ({
 
         {/* Submit */}
         <button type="submit" disabled={(!oText.trim() && !origin) || (!dText.trim() && !destination) || isLoadingRoute || resolving} className="route-btn">
-          {isLoadingRoute || resolving ? <><Loader2 size={15} className="spin" /> Finding route…</> : <><Navigation size={15} /> Get Directions</>}
+          {isLoadingRoute || resolving ? <><Loader2 size={15} className="spin" /> {t('findingRoute')}</> : <><Navigation size={15} /> {t('getDirections')}</>}
         </button>
       </form>
     </div>
@@ -18812,6 +19062,7 @@ import React from 'react';
 import { Navigation, Compass, X, StopCircle } from 'lucide-react';
 import { formatDistance, formatDuration } from '../services/mapplsRouteService';
 import type { RouteResult } from '../services/mapplsRouteService';
+import { useI18n } from '../i18n';
 
 interface TripDetailsCardProps {
   route: RouteResult;
@@ -18833,7 +19084,10 @@ export const TripDetailsCard: React.FC<TripDetailsCardProps> = ({
   onEndJourney,
   onToggleViewMode,
   onClose,
-}) => (
+}) => {
+  const { t } = useI18n();
+
+  return (
   <div className="trip-card">
     {/* Stats row */}
     <div className="trip-stats">
@@ -18849,12 +19103,12 @@ export const TripDetailsCard: React.FC<TripDetailsCardProps> = ({
       {!isJourneyActive ? (
         <button className="trip-start-btn" onClick={onStartJourney}>
           <Navigation size={16} />
-          Start Drive
+          {t('startDrive')}
         </button>
       ) : (
         <button className="trip-stop-btn" onClick={onEndJourney}>
           <StopCircle size={16} />
-          End Drive
+          {t('endDrive')}
         </button>
       )}
       <button className="trip-view-btn" onClick={onToggleViewMode}>
@@ -18872,16 +19126,17 @@ export const TripDetailsCard: React.FC<TripDetailsCardProps> = ({
         </div>
         <div className="hud-stat">
           <span className="hud-val">{formatDistance(route.distance)}</span>
-          <span className="hud-unit">total</span>
+          <span className="hud-unit">{t('total')}</span>
         </div>
         <div className="hud-stat">
           <span className="hud-val">{formatDuration(route.duration)}</span>
-          <span className="hud-unit">est.</span>
+          <span className="hud-unit">{t('estimated')}</span>
         </div>
       </div>
     )}
   </div>
-);
+  );
+};
 </file>
 
 <file path="ui/src/data/mockHistoricalData.ts">
@@ -20043,10 +20298,13 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import { I18nProvider } from './i18n'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <I18nProvider>
+      <App />
+    </I18nProvider>
   </StrictMode>,
 )
 </file>
@@ -21101,97 +21359,323 @@ func POCOSMRouteHandler(manager *startup.Manager) http.HandlerFunc {
 }
 </file>
 
-<file path="Routing Engine/internal/poc/osm/hazard_mapper.go">
+<file path="Routing Engine/internal/poc/graph/graph.go">
+package graph
+
+import (
+	"container/heap"
+	"errors"
+	"math"
+)
+
+// Edge represents a road segment connecting two nodes.
+type Edge struct {
+	ID     string
+	From   int32
+	To     int32
+	Weight float64
+}
+
+// Coordinate represents a geographic point.
+type Coordinate struct {
+	Lat float64
+	Lon float64
+}
+
+// Graph represents the in-memory road network.
+type Graph struct {
+	Nodes      [][]Edge
+	NodeCoords []Coordinate
+
+	OSMToInternal map[int64]int32
+	InternalToOSM []int64
+}
+
+// NewGraph initializes a new empty graph.
+func NewGraph() *Graph {
+	return &Graph{
+		Nodes:         make([][]Edge, 0),
+		NodeCoords:    make([]Coordinate, 0),
+		OSMToInternal: make(map[int64]int32),
+		InternalToOSM: make([]int64, 0),
+	}
+}
+
+// GetOrAddNode maps an OSM node ID to an internal int32 ID.
+func (g *Graph) GetOrAddNode(osmID int64) int32 {
+	if internalID, exists := g.OSMToInternal[osmID]; exists {
+		return internalID
+	}
+	internalID := int32(len(g.InternalToOSM))
+	g.OSMToInternal[osmID] = internalID
+	g.InternalToOSM = append(g.InternalToOSM, osmID)
+
+	// Pre-allocate slots
+	g.Nodes = append(g.Nodes, nil)
+	g.NodeCoords = append(g.NodeCoords, Coordinate{})
+
+	return internalID
+}
+
+// AddEdge adds a directed edge to the graph.
+func (g *Graph) AddEdge(id string, from, to int32, weight float64) {
+	g.Nodes[from] = append(g.Nodes[from], Edge{
+		ID:     id,
+		From:   from,
+		To:     to,
+		Weight: weight,
+	})
+}
+
+// SetNodeCoord saves the physical coordinates of a node.
+func (g *Graph) SetNodeCoord(id int32, lat, lon float64) {
+	g.NodeCoords[id] = Coordinate{Lat: lat, Lon: lon}
+}
+
+// isBlocked checks if an edge ID is in the blocked list.
+func isBlocked(id string, blockedIDs []string) bool {
+	for _, bID := range blockedIDs {
+		if id == bID {
+			return true
+		}
+	}
+	return false
+}
+
+// PriorityQueue implementation for A* algorithm.
+type Item struct {
+	nodeID   int32
+	priority float64
+	gCost    float64
+	index    int
+}
+
+type PriorityQueue []*Item
+
+func (pq PriorityQueue) Len() int { return len(pq) }
+
+func (pq PriorityQueue) Less(i, j int) bool {
+	return pq[i].priority < pq[j].priority
+}
+
+func (pq PriorityQueue) Swap(i, j int) {
+	pq[i], pq[j] = pq[j], pq[i]
+	pq[i].index = i
+	pq[j].index = j
+}
+
+func (pq *PriorityQueue) Push(x interface{}) {
+	n := len(*pq)
+	item := x.(*Item)
+	item.index = n
+	*pq = append(*pq, item)
+}
+
+func (pq *PriorityQueue) Pop() interface{} {
+	old := *pq
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = nil  // avoid memory leak
+	item.index = -1 // for safety
+	*pq = old[0 : n-1]
+	return item
+}
+
+// PathResult represents the output of the shortest path algorithm.
+type PathResult struct {
+	Edges       []Edge
+	TotalWeight float64
+}
+
+// FindShortestPath uses A* algorithm to find the shortest path from start to end,
+// ignoring any edges whose IDs are present in blockedSegmentIDs.
+func (g *Graph) FindShortestPath(start, end int32, blockedSegmentIDs []string) (*PathResult, error) {
+	if int(end) >= len(g.NodeCoords) || int(start) >= len(g.NodeCoords) {
+		return nil, errors.New("node coordinates not found")
+	}
+	endCoord := g.NodeCoords[end]
+
+	dist := make(map[int32]float64)
+	prev := make(map[int32]*Edge)
+
+	dist[start] = 0.0
+
+	pq := make(PriorityQueue, 0)
+	heap.Init(&pq)
+
+	startCoord := g.NodeCoords[start]
+	hStart := fastHeuristicM(startCoord.Lat, startCoord.Lon, endCoord.Lat, endCoord.Lon)
+	heap.Push(&pq, &Item{nodeID: start, priority: hStart, gCost: 0})
+
+	for pq.Len() > 0 {
+		curr := heap.Pop(&pq).(*Item)
+
+		// Optimization: if we reached the end, we can stop
+		if curr.nodeID == end {
+			break
+		}
+
+		// It's possible we found a better path before popping this item
+		if curr.gCost > dist[curr.nodeID] {
+			continue
+		}
+
+		for i := range g.Nodes[curr.nodeID] {
+			edge := &g.Nodes[curr.nodeID][i]
+			if isBlocked(edge.ID, blockedSegmentIDs) {
+				continue
+			}
+
+			newDist := curr.gCost + edge.Weight
+
+			// If we haven't visited this node yet, its distance is conceptually infinity
+			currentDist, exists := dist[edge.To]
+			if !exists || newDist < currentDist {
+				dist[edge.To] = newDist
+				prev[edge.To] = edge
+
+				toCoord := g.NodeCoords[edge.To]
+				h := fastHeuristicM(toCoord.Lat, toCoord.Lon, endCoord.Lat, endCoord.Lon)
+				heap.Push(&pq, &Item{nodeID: edge.To, priority: newDist + h, gCost: newDist})
+			}
+		}
+	}
+
+	if dist[end] >= 1e9 {
+		return nil, errors.New("no route found")
+	}
+
+	// Reconstruct path by walking backwards: Destination -> predecessor -> Start
+	var path []Edge
+	currNode := end
+	for currNode != start {
+		e := prev[currNode]
+		if e == nil {
+			return nil, errors.New("broken path during reconstruction: no predecessor found")
+		}
+		path = append(path, *e)
+		currNode = e.From
+	}
+
+	// Reverse the path to get Start -> Destination order
+	for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
+		path[i], path[j] = path[j], path[i]
+	}
+
+	return &PathResult{
+		Edges:       path,
+		TotalWeight: dist[end],
+	}, nil
+}
+
+// Fast Euclidean approximation (meters) replacing expensive trigonometric Haversine
+// This dramatically accelerates A* PriorityQueue insertions.
+func fastHeuristicM(lat1, lon1, lat2, lon2 float64) float64 {
+	dLat := (lat2 - lat1) * 111320.0
+	// Calculate cosine once for the average latitude to scale the longitude
+	avgLat := (lat1 + lat2) / 2.0 * (math.Pi / 180.0)
+	dLon := (lon2 - lon1) * 111320.0 * math.Cos(avgLat)
+	return math.Sqrt(dLat*dLat + dLon*dLon)
+}
+</file>
+
+<file path="Routing Engine/internal/poc/graph/store.go">
+package graph
+
+import (
+	"bufio"
+	"encoding/gob"
+	"fmt"
+	"os"
+)
+
+// SaveToFile serializes the Graph to a gob file using buffered I/O for speed.
+func (g *Graph) SaveToFile(filepath string) error {
+	file, err := os.Create(filepath)
+	if err != nil {
+		return fmt.Errorf("could not create file %s: %w", filepath, err)
+	}
+	defer file.Close()
+
+	// Use an 8MB buffer to minimize disk writes
+	writer := bufio.NewWriterSize(file, 8*1024*1024)
+	encoder := gob.NewEncoder(writer)
+
+	if err := encoder.Encode(g); err != nil {
+		return fmt.Errorf("failed to encode graph: %w", err)
+	}
+
+	// Flush remaining buffer to disk
+	return writer.Flush()
+}
+
+// LoadFromFile deserializes the Graph from a gob file using buffered I/O.
+func LoadFromFile(filepath string) (*Graph, error) {
+	file, err := os.Open(filepath)
+	if err != nil {
+		return nil, fmt.Errorf("could not open file %s: %w", filepath, err)
+	}
+	defer file.Close()
+
+	// Use an 8MB buffer to minimize disk reads (Massive speedup for NER graph)
+	reader := bufio.NewReaderSize(file, 8*1024*1024)
+
+	var g Graph
+	decoder := gob.NewDecoder(reader)
+	if err := decoder.Decode(&g); err != nil {
+		return nil, fmt.Errorf("failed to decode graph: %w", err)
+	}
+	return &g, nil
+}
+</file>
+
+<file path="Routing Engine/internal/poc/osm/nearest.go">
 package osm
 
 import (
+	"errors"
 	"routing-engine/internal/models"
 	"routing-engine/internal/poc/graph"
 	"routing-engine/internal/utils"
 )
 
-// FindAffectedSegments takes an in-memory graph and an array of hazards,
-// returning a list of all edge IDs that intersect ANY hazard's radius.
-func FindAffectedSegments(g *graph.Graph, hazards []models.Hazard) []string {
-	var affectedIDs []string
+// FindNearestNode searches the graph for the closest physical drivable node using a spatial bounding box.
+func FindNearestNode(g *graph.Graph, target models.Coordinate, maxSnapDistanceM float64) (int32, float64, error) {
+	if g == nil || len(g.NodeCoords) == 0 {
+		return -1, 0, errors.New("empty graph")
+	}
 
-	// Keep track of checked edges to avoid duplicates in bidirectional graphs
-	checked := make(map[string]bool)
+	var bestNodeID int32 = -1
+	minDistance := -1.0
 
-	for i := range g.Nodes {
-		for _, edge := range g.Nodes[i] {
-			if checked[edge.ID] {
-				continue
-			}
-			checked[edge.ID] = true
+	// 1 degree is roughly 111,000 meters. Create a rapid filtering box.
+	degreeOffset := maxSnapDistanceM / 111000.0
+	minLat, maxLat := target.Lat-degreeOffset, target.Lat+degreeOffset
+	minLon, maxLon := target.Lng-degreeOffset, target.Lng+degreeOffset
 
-			coord1 := g.NodeCoords[edge.From]
-			coord2 := g.NodeCoords[edge.To]
-			if coord1.Lat == 0 && coord1.Lon == 0 || coord2.Lat == 0 && coord2.Lon == 0 {
-				continue
-			}
+	for i, coords := range g.NodeCoords {
+		// SPATIAL INDEXING: Skip millions of nodes instantly if they aren't in the local square
+		if coords.Lat < minLat || coords.Lat > maxLat || coords.Lon < minLon || coords.Lon > maxLon {
+			continue
+		}
 
-			// Loop through ALL active hazards
-			for _, hazard := range hazards {
-				if segmentIntersectsHazard(coord1, coord2, hazard) {
-					affectedIDs = append(affectedIDs, edge.ID)
-					break // Once an edge is blocked by one hazard, no need to check others
-				}
-			}
+		if len(g.Nodes[i]) == 0 {
+			continue // Skip dead-end nodes
+		}
+
+		dist := utils.HaversineDistanceM(coords.Lat, coords.Lon, target.Lat, target.Lng)
+
+		if minDistance == -1.0 || dist < minDistance {
+			minDistance = dist
+			bestNodeID = int32(i)
 		}
 	}
 
-	return affectedIDs
-}
-
-// RouteAroundHazard connects the hazard mapper and graph pathfinder to find a safe alternate route.
-func RouteAroundHazard(g *graph.Graph, start, end int32, hazards []models.Hazard) (*graph.PathResult, []string, error) {
-	var blockedIDs []string
-	if len(hazards) > 0 {
-		blockedIDs = FindAffectedSegments(g, hazards)
+	if bestNodeID == -1 || minDistance > maxSnapDistanceM {
+		return -1, minDistance, errors.New("no drivable road found within snap distance")
 	}
 
-	path, err := g.FindShortestPath(start, end, blockedIDs)
-	return path, blockedIDs, err
-}
-
-// segmentIntersectsHazard approximates line-circle intersection by testing points along the segment.
-func segmentIntersectsHazard(p1, p2 graph.Coordinate, h models.Hazard) bool {
-	// 1. Quick check: Are endpoints inside?
-	d1 := utils.HaversineDistanceM(p1.Lat, p1.Lon, h.Latitude, h.Longitude)
-	if d1 <= h.RadiusM {
-		return true
-	}
-
-	d2 := utils.HaversineDistanceM(p2.Lat, p2.Lon, h.Latitude, h.Longitude)
-	if d2 <= h.RadiusM {
-		return true
-	}
-
-	// 2. Interpolate points along the segment to catch crossings.
-	// We'll test every ~20 meters.
-	totalDist := utils.HaversineDistanceM(p1.Lat, p1.Lon, p2.Lat, p2.Lon)
-	if totalDist == 0 {
-		return false
-	}
-
-	steps := int(totalDist / 20.0)
-	if steps < 1 {
-		steps = 1
-	}
-
-	for i := 1; i < steps; i++ {
-		fraction := float64(i) / float64(steps)
-		lat := p1.Lat + (p2.Lat-p1.Lat)*fraction
-		lon := p1.Lon + (p2.Lon-p1.Lon)*fraction
-
-		dist := utils.HaversineDistanceM(lat, lon, h.Latitude, h.Longitude)
-		if dist <= h.RadiusM {
-			return true
-		}
-	}
-
-	return false
+	return bestNodeID, minDistance, nil
 }
 </file>
 
@@ -21368,79 +21852,13 @@ func readWays(path string, g *graph.Graph) error {
 }
 </file>
 
-<file path="Routing Engine/internal/services/hazard/service.go">
-package hazard
-
-import (
-	"encoding/json"
-	"log/slog"
-	"net/http"
-	"os"
-	"time"
-
-	"routing-engine/internal/models"
-)
-
-// Service provides access to hazards.
-type Service struct {
-	aiEndpoint string
-	client     *http.Client
-}
-
-// NewService creates a new hazard service connected to the Python AI Engine.
-func NewService() *Service {
-	// Allows overriding the URL for Docker/production, defaults to local Python server
-	endpoint := os.Getenv("AI_SERVICE_URL")
-	if endpoint == "" {
-		endpoint = "http://localhost:8000/api/v1/predict-hazards"
-	}
-
-	return &Service{
-		aiEndpoint: endpoint,
-		client: &http.Client{
-			Timeout: 20 * time.Second, // 5-second timeout so Go doesn't hang if Python is down
-		},
-	}
-}
-
-// GetActiveHazards fetches dynamic AI predictions from the Python microservice via HTTP GET.
-func (s *Service) GetActiveHazards() []models.Hazard {
-	resp, err := s.client.Get(s.aiEndpoint)
-	if err != nil {
-		slog.Error("Failed to reach AI hazard service, falling back to empty list", "error", err)
-		return []models.Hazard{}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		slog.Error("AI service returned non-200 status", "status", resp.StatusCode)
-		return []models.Hazard{}
-	}
-
-	var hazards []models.Hazard
-	if err := json.NewDecoder(resp.Body).Decode(&hazards); err != nil {
-		slog.Error("Failed to decode AI hazard response", "error", err)
-		return []models.Hazard{}
-	}
-
-	var active []models.Hazard
-	for _, h := range hazards {
-		if h.Active && h.IsValid() {
-			active = append(active, h)
-		}
-	}
-
-	slog.Info("Successfully fetched AI hazards", "count", len(active))
-	return active
-}
-</file>
-
 <file path="Routing Engine/go.mod">
 module routing-engine
 
 go 1.27.0
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	github.com/qedus/osmpbf v1.2.0 // indirect
 	google.golang.org/protobuf v1.26.0 // indirect
 )
@@ -21634,12 +22052,13 @@ export function calculateBearing(startLat: number, startLng: number, destLat: nu
 export async function fetchAutosuggest(
   query: string,
   token: string,
-  locationBias?: { lat: number; lng: number }
+  locationBias?: { lat: number; lng: number },
+  language = 'en',
 ): Promise<PlaceSuggestion[]> {
   const trimmed = query.trim();
   if (!trimmed || trimmed.length < 2) return [];
 
-  const cacheKey = `${trimmed.toLowerCase()}_${locationBias?.lat || ''}_${locationBias?.lng || ''}`;
+  const cacheKey = `${language}_${trimmed.toLowerCase()}_${locationBias?.lat || ''}_${locationBias?.lng || ''}`;
   if (suggestCache.has(cacheKey)) {
     return suggestCache.get(cacheKey)!;
   }
@@ -21648,6 +22067,7 @@ export async function fetchAutosuggest(
     access_token: token,
     query: trimmed,
     region: 'IND',
+    language,
   });
 
   if (locationBias) {
@@ -21704,12 +22124,13 @@ export async function fetchAutosuggest(
 // Geocode place name or address to high-precision coordinates
 export async function geocodePlace(
   addressOrName: string,
-  token: string
+  token: string,
+  language = 'en',
 ): Promise<{ lat: number; lng: number; formattedAddress: string } | null> {
   const trimmed = addressOrName.trim();
   if (!trimmed) return null;
 
-  const cacheKey = trimmed.toLowerCase();
+  const cacheKey = `${language}_${trimmed.toLowerCase()}`;
   if (geocodeCache.has(cacheKey)) {
     return geocodeCache.get(cacheKey)!;
   }
@@ -21720,6 +22141,7 @@ export async function geocodePlace(
       access_token: token,
       address: trimmed,
       itemCount: '1',
+      language,
     });
     let res = await fetch(`/api/mappls-search/search/address/geocode?${params.toString()}`);
     if (!res.ok) {
@@ -21788,10 +22210,11 @@ export async function fetchRouteDirections(
 export async function fetchSafeRoute(
   origin: { lat: number; lng: number },
   destination: { lat: number; lng: number },
-  profile: 'driving' | 'biking' | 'walking' = 'driving'
+  profile: 'driving' | 'biking' | 'walking' = 'driving',
+  language = 'en',
 ): Promise<any> {
   const waypoints = `${origin.lng},${origin.lat};${destination.lng},${destination.lat}`;
-  const queryParams = new URLSearchParams({ waypoints, profile });
+  const queryParams = new URLSearchParams({ waypoints, profile, language });
   const path = `/api/v1/safe-route?${queryParams.toString()}`;
 
   const res = await fetch(path);
@@ -21803,8 +22226,8 @@ export async function fetchSafeRoute(
   return data;
 }
 
-export async function fetchActiveHazards(): Promise<any[]> {
-  const res = await fetch('/api/v1/hazards');
+export async function fetchActiveHazards(language = 'en'): Promise<any[]> {
+  const res = await fetch(`/api/v1/hazards?language=${encodeURIComponent(language)}`);
   if (!res.ok) {
     console.error('Failed to fetch hazards');
     return [];
@@ -21839,9 +22262,9 @@ export interface SystemStatus {
   };
 }
 
-export async function fetchSystemStatus(): Promise<SystemStatus | null> {
+export async function fetchSystemStatus(language = 'en'): Promise<SystemStatus | null> {
   try {
-    const res = await fetch('/api/v1/system/status');
+    const res = await fetch(`/api/v1/system/status?language=${encodeURIComponent(language)}`);
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -22192,6 +22615,7 @@ import (
 	"strconv"
 	"strings"
 
+	"routing-engine/internal/localization"
 	"routing-engine/internal/models"
 	"routing-engine/internal/poc/graph"
 	"routing-engine/internal/poc/osm"
@@ -22205,6 +22629,8 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")
+		language := localization.FromRequest(r)
+		w.Header().Set("Content-Language", language)
 
 		g := manager.GetGraph()
 		if g == nil {
@@ -22272,6 +22698,7 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 
 		response := models.SafeRouteResponse{
 			AvoidedHazards: []models.HazardIntersection{},
+			Language:       language,
 		}
 
 		// 2. Check each active hazard against the primary route independently.
@@ -22296,7 +22723,7 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 			altPath, blockedIDs, err := osm.RouteAroundHazard(g, startNode, endNode, intersectingHazards)
 			if err == nil {
 				response.AlternateSafeRoute = buildRouteResult(g, altPath)
-				response.SelectionReason = "Avoided multiple dynamic hazards using AI predictions."
+				response.SelectionReason = localization.Message(language, "hazard_avoided")
 
 				// Report only hazards that actually intersected the primary route.
 				for _, h := range intersectingHazards {
@@ -22313,10 +22740,10 @@ func SafeRouteHandler(hazardSvc *hazard.Service, manager *startup.Manager) http.
 				}
 				_ = blockedIDs
 			} else {
-				response.SelectionReason = "Hazard intersects route, but no alternate route was found."
+				response.SelectionReason = localization.Message(language, "hazard_no_alternate")
 			}
 		} else {
-			response.SelectionReason = "Primary route is safe based on live telemetry."
+			response.SelectionReason = localization.Message(language, "primary_safe")
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -22363,6 +22790,198 @@ func buildRouteResult(g *graph.Graph, path *graph.PathResult) *models.RouteResul
 		Polyline:    utils.EncodePolyline(coords, 5),
 		Coordinates: coords,
 	}
+}
+</file>
+
+<file path="Routing Engine/internal/poc/osm/hazard_mapper.go">
+package osm
+
+import (
+	"routing-engine/internal/models"
+	"routing-engine/internal/poc/graph"
+	"routing-engine/internal/utils"
+)
+
+// FindAffectedSegments uses a Spatial Bounding Box to instantly find local edges
+func FindAffectedSegments(g *graph.Graph, hazards []models.Hazard) []string {
+	var affectedIDs []string
+	checked := make(map[string]bool)
+
+	for _, h := range hazards {
+		// 1 degree is roughly 111,000 meters. Add a 500m buffer to the bounding box.
+		degreeOffset := (h.RadiusM + 500.0) / 111000.0
+		minLat, maxLat := h.Latitude-degreeOffset, h.Latitude+degreeOffset
+		minLon, maxLon := h.Longitude-degreeOffset, h.Longitude+degreeOffset
+
+		for i, coord1 := range g.NodeCoords {
+			// Bounding Box Filter: Skip millions of irrelevant nodes instantly
+			if coord1.Lat < minLat || coord1.Lat > maxLat || coord1.Lon < minLon || coord1.Lon > maxLon {
+				continue
+			}
+
+			// Only evaluate edges connected to nodes physically inside the danger square
+			for _, edge := range g.Nodes[i] {
+				if checked[edge.ID] {
+					continue
+				}
+				checked[edge.ID] = true
+
+				coord2 := g.NodeCoords[edge.To]
+				if segmentIntersectsHazard(coord1, coord2, h) {
+					affectedIDs = append(affectedIDs, edge.ID)
+				}
+			}
+		}
+	}
+	return affectedIDs
+}
+
+// segmentIntersectsHazard approximates line-circle intersection.
+func segmentIntersectsHazard(p1, p2 graph.Coordinate, h models.Hazard) bool {
+	d1 := utils.HaversineDistanceM(p1.Lat, p1.Lon, h.Latitude, h.Longitude)
+	if d1 <= h.RadiusM {
+		return true
+	}
+	d2 := utils.HaversineDistanceM(p2.Lat, p2.Lon, h.Latitude, h.Longitude)
+	if d2 <= h.RadiusM {
+		return true
+	}
+
+	totalDist := utils.HaversineDistanceM(p1.Lat, p1.Lon, p2.Lat, p2.Lon)
+	if totalDist == 0 {
+		return false
+	}
+
+	steps := int(totalDist / 20.0)
+	if steps < 1 {
+		steps = 1
+	}
+
+	for i := 1; i < steps; i++ {
+		fraction := float64(i) / float64(steps)
+		lat := p1.Lat + (p2.Lat-p1.Lat)*fraction
+		lon := p1.Lon + (p2.Lon-p1.Lon)*fraction
+
+		dist := utils.HaversineDistanceM(lat, lon, h.Latitude, h.Longitude)
+		if dist <= h.RadiusM {
+			return true
+		}
+	}
+	return false
+}
+
+func RouteAroundHazard(g *graph.Graph, start, end int32, hazards []models.Hazard) (*graph.PathResult, []string, error) {
+	var blockedIDs []string
+	if len(hazards) > 0 {
+		blockedIDs = FindAffectedSegments(g, hazards)
+	}
+	path, err := g.FindShortestPath(start, end, blockedIDs)
+	return path, blockedIDs, err
+}
+</file>
+
+<file path="Routing Engine/internal/services/hazard/service.go">
+package hazard
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"os"
+	"sync"
+	"time"
+
+	"routing-engine/internal/models"
+)
+
+// Service provides access to hazards.
+type Service struct {
+	aiEndpoint string
+	client     *http.Client
+
+	// RWMutex protects the cachedHazards array from concurrent read/write panics
+	mu            sync.RWMutex
+	cachedHazards []models.Hazard
+}
+
+// NewService creates a new hazard service and boots the background polling worker.
+func NewService() *Service {
+	endpoint := os.Getenv("AI_SERVICE_URL")
+	if endpoint == "" {
+		endpoint = "http://localhost:8000/api/v1/predict-hazards"
+	}
+
+	svc := &Service{
+		aiEndpoint: endpoint,
+		client: &http.Client{
+			Timeout: 5 * time.Second,
+		},
+		cachedHazards: []models.Hazard{},
+	}
+
+	// Detach the network polling into an infinite background goroutine
+	go svc.pollHazards()
+
+	return svc
+}
+
+// pollHazards runs continuously, fetching live AI predictions every 10 seconds.
+func (s *Service) pollHazards() {
+	// Execute an immediate initial fetch so the cache isn't empty on boot
+	s.updateCache()
+
+	ticker := time.NewTicker(10 * time.Second)
+	for range ticker.C {
+		s.updateCache()
+	}
+}
+
+// updateCache makes the HTTP request and safely swaps the memory state.
+func (s *Service) updateCache() {
+	resp, err := s.client.Get(s.aiEndpoint)
+	if err != nil {
+		slog.Error("Background poller failed to reach AI service", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("Background poller received non-200 status", "status", resp.StatusCode)
+		return
+	}
+
+	var hazards []models.Hazard
+	if err := json.NewDecoder(resp.Body).Decode(&hazards); err != nil {
+		slog.Error("Background poller failed to decode JSON", "error", err)
+		return
+	}
+
+	var active []models.Hazard
+	for _, h := range hazards {
+		if h.Active && h.IsValid() {
+			active = append(active, h)
+		}
+	}
+
+	// Lock the state exclusively to writers, swap the array, and instantly unlock
+	s.mu.Lock()
+	s.cachedHazards = active
+	s.mu.Unlock()
+
+	slog.Debug("AI hazard cache updated successfully", "count", len(active))
+}
+
+// GetActiveHazards now executes in O(1) time by reading directly from the locked cache.
+func (s *Service) GetActiveHazards() []models.Hazard {
+	// RLock allows multiple incoming HTTP requests to read the cache simultaneously
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Return a copy of the slice so external handlers cannot mutate the internal cache
+	copyHazards := make([]models.Hazard, len(s.cachedHazards))
+	copy(copyHazards, s.cachedHazards)
+
+	return copyHazards
 }
 </file>
 
@@ -22688,6 +23307,7 @@ import {
 } from 'lucide-react';
 import type { RouteResult } from '../services/mapplsRouteService';
 import type { LocationPoint } from './RouteSearchBox';
+import { useI18n } from '../i18n';
 
 /* ── Custom HTML Marker Templates ────────────────────────────────── */
 const ORIGIN_MARKER_HTML = `
@@ -22759,6 +23379,7 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
   onToggleViewMode,
   onOpenTokenModal,
 }) => {
+  const { t } = useI18n();
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
   const originMarkerRef = useRef<any>(null);
@@ -23254,16 +23875,16 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
 
       {/* Top-Right Standard Controls */}
       <div className="map-floating-controls">
-        <button title={`${theme === 'dark' ? 'Light' : 'Dark'} mode`} onClick={onToggleTheme} className="map-ctrl-btn">
+        <button title={`${theme === 'dark' ? t('light') : t('dark')} ${t('mode')}`} onClick={onToggleTheme} className="map-ctrl-btn">
           {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
         </button>
         <button title={`${viewMode.toUpperCase()} view`} onClick={onToggleViewMode} className={`map-ctrl-btn ${viewMode === '3d' ? 'active' : ''}`}>
           <Compass size={16} />
         </button>
-        <button title="Recenter" onClick={recenter} className="map-ctrl-btn"><RotateCcw size={15} /></button>
+        <button title={t('recenter')} onClick={recenter} className="map-ctrl-btn"><RotateCcw size={15} /></button>
         <div className="ctrl-divider" />
-        <button title="Zoom in" onClick={() => mapInstanceRef.current?.setZoom(mapInstanceRef.current.getZoom() + 1)} className="map-ctrl-btn"><ZoomIn size={15} /></button>
-        <button title="Zoom out" onClick={() => mapInstanceRef.current?.setZoom(mapInstanceRef.current.getZoom() - 1)} className="map-ctrl-btn"><ZoomOut size={15} /></button>
+        <button title={t('zoomIn')} onClick={() => mapInstanceRef.current?.setZoom(mapInstanceRef.current.getZoom() + 1)} className="map-ctrl-btn"><ZoomIn size={15} /></button>
+        <button title={t('zoomOut')} onClick={() => mapInstanceRef.current?.setZoom(mapInstanceRef.current.getZoom() - 1)} className="map-ctrl-btn"><ZoomOut size={15} /></button>
       </div>
 
       {/* Bottom-Right Google Maps Interactive Compass Widget */}
@@ -23357,9 +23978,9 @@ export const NavigationMap: React.FC<NavigationMapProps> = ({
         <div className="map-error-overlay">
           <div className="error-card">
             <AlertTriangle size={22} />
-            <h3>Map Unavailable</h3>
+            <h3>{t('mapUnavailable')}</h3>
             <p>{loadError}</p>
-            <button onClick={onOpenTokenModal}>Configure Key</button>
+            <button onClick={onOpenTokenModal}>{t('configureKey')}</button>
           </div>
         </div>
       )}
@@ -25214,6 +25835,29 @@ input {
   color: var(--text-faint);
   letter-spacing: 0.01em;
 }
+
+.language-selector select {
+  max-width: 112px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-medium);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-main);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 </file>
 
 <file path="ui/src/App.tsx">
@@ -25235,8 +25879,10 @@ import type { MockDriveState } from './services/mockDriveEngine';
 import type { RouteResult } from './services/mapplsRouteService';
 import { generateScenicRoute } from './services/mockCustomRoute';
 import './App.css';
+import { useI18n } from './i18n';
 
 export function App() {
+  const { language, t } = useI18n();
   const [token, setToken] = useState<string>(() => {
     return (
       import.meta.env.VITE_MAPPLS_ACCESS_TOKEN ||
@@ -25360,9 +26006,10 @@ export function App() {
         fetchSafeRoute(
           { lat: activeOrigin.lat, lng: activeOrigin.lng },
           { lat: activeDest.lat, lng: activeDest.lng },
-          'driving'
+          'driving',
+          language,
         ),
-        fetchActiveHazards(),
+        fetchActiveHazards(language),
       ]);
 
       setRoute(safeRes.primary_route);
@@ -25414,7 +26061,7 @@ export function App() {
       }
     } catch (err: any) {
       console.error('Failed to calculate route:', err);
-      setRouteError(err?.message || 'Could not calculate directions between points.');
+      setRouteError(err?.message || t('couldNotCalculateRoute'));
     } finally {
       setIsLoadingRoute(false);
     }
@@ -25425,7 +26072,7 @@ export function App() {
     if (token && origin && destination && !route) {
       handleCalculateRoute();
     }
-  }, [token]);
+  }, [token, language]);
 
   // Start Real Journey
   const handleStartJourney = () => {

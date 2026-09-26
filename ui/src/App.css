@@ -1843,3 +1843,26 @@ input {
   color: var(--text-faint);
   letter-spacing: 0.01em;
 }
+
+.language-selector select {
+  max-width: 112px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-medium);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-main);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

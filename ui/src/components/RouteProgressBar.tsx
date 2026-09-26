@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Database, Route, Loader2, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { fetchSystemStatus } from '../services/mapplsRouteService';
 import type { SystemStatus } from '../services/mapplsRouteService';
+import { useI18n } from '../i18n';
 
 interface RouteProgressBarProps {
   isLoadingRoute: boolean;
@@ -18,6 +19,7 @@ const STAGE_CONFIG: Record<string, { icon: React.ReactNode; label: string; color
 };
 
 export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRoute }) => {
+  const { language, t } = useI18n();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [routePhase, setRoutePhase] = useState<'idle' | 'snapping' | 'pathfinding' | 'hazards' | 'done'>('idle');
   const [routePct, setRoutePct] = useState(0);
@@ -29,7 +31,7 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRou
     let mounted = true;
 
     const poll = async () => {
-      const s = await fetchSystemStatus();
+      const s = await fetchSystemStatus(language);
       if (!mounted) return;
       setStatus(s);
       if (s && s.state !== 'ready' && s.state !== 'error') {
@@ -41,7 +43,7 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRou
     interval = setInterval(poll, 1500);
 
     return () => { mounted = false; clearInterval(interval); };
-  }, []);
+  }, [language]);
 
   // Simulate route calculation phases when isLoadingRoute is true
   useEffect(() => {
@@ -88,7 +90,7 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRou
         <div className="route-progress-card">
           <div className="rp-header">
             <Database size={18} className="rp-header-icon" />
-            <span className="rp-title">Initializing NER Road Graph</span>
+            <span className="rp-title">{t('initializingRoadGraph')}</span>
           </div>
           <div className="rp-stage-row">
             <span className="rp-stage-icon" style={{ color: cfg.color }}>{cfg.icon}</span>
@@ -102,7 +104,7 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRou
           </div>
           <div className="rp-meta">
             <span className="rp-pct">{Math.round(pct)}%</span>
-            <span className="rp-hint">8-state NER coverage · first-time setup</span>
+            <span className="rp-hint">{t('coverageHint')}</span>
           </div>
         </div>
       </div>
@@ -111,10 +113,8 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRou
 
   // Route calculation mode
   const routeLabels: Record<string, string> = {
-    snapping: 'Snapping to nearest road…',
-    pathfinding: 'Running A* pathfinder…',
-    hazards: 'Evaluating hazard zones…',
-    done: 'Route ready!',
+    snapping: t('snappingToRoad'), pathfinding: t('runningPathfinder'),
+    hazards: t('evaluatingHazards'), done: t('routeReady'),
   };
 
   const routeColors: Record<string, string> = {
@@ -129,13 +129,13 @@ export const RouteProgressBar: React.FC<RouteProgressBarProps> = ({ isLoadingRou
       <div className="route-progress-card route-progress-compact">
         <div className="rp-header">
           <Route size={16} className="rp-header-icon" />
-          <span className="rp-title">Calculating Safe Route</span>
+          <span className="rp-title">{t('calculatingSafeRoute')}</span>
         </div>
         <div className="rp-stage-row">
           <span className="rp-stage-icon" style={{ color: routeColors[routePhase] || '#a78bfa' }}>
             {routePhase === 'done' ? <CheckCircle2 size={14} /> : <Loader2 size={14} className="spin" />}
           </span>
-          <span className="rp-stage-label">{routeLabels[routePhase] || 'Preparing…'}</span>
+          <span className="rp-stage-label">{routeLabels[routePhase] || t('preparing')}</span>
         </div>
         <div className="rp-bar-track">
           <div

@@ -16,8 +16,10 @@ import type { MockDriveState } from './services/mockDriveEngine';
 import type { RouteResult } from './services/mapplsRouteService';
 import { generateScenicRoute } from './services/mockCustomRoute';
 import './App.css';
+import { useI18n } from './i18n';
 
 export function App() {
+  const { language, t } = useI18n();
   const [token, setToken] = useState<string>(() => {
     return (
       import.meta.env.VITE_MAPPLS_ACCESS_TOKEN ||
@@ -30,18 +32,8 @@ export function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [viewMode, setViewMode] = useState<'3d' | '2d' | 'overview'>('3d');
 
-  // Start with default route: Guwahati to Shillong
-  const [origin, setOrigin] = useState<LocationPoint | null>({
-    name: 'Guwahati, Assam',
-    lat: 26.1445,
-    lng: 91.7362,
-  });
-
-  const [destination, setDestination] = useState<LocationPoint | null>({
-    name: 'Shillong, Meghalaya',
-    lat: 25.5788,
-    lng: 91.8933,
-  });
+  const [origin, setOrigin] = useState<LocationPoint | null>(null);
+  const [destination, setDestination] = useState<LocationPoint | null>(null);
 
   const [route, setRoute] = useState<RouteResult | null>(null);
   const [customRouteCoords, setCustomRouteCoords] = useState<{lat: number, lng: number}[] | null>(null);
@@ -141,9 +133,10 @@ export function App() {
         fetchSafeRoute(
           { lat: activeOrigin.lat, lng: activeOrigin.lng },
           { lat: activeDest.lat, lng: activeDest.lng },
-          'driving'
+          'driving',
+          language,
         ),
-        fetchActiveHazards(),
+        fetchActiveHazards(language),
       ]);
 
       setRoute(safeRes.primary_route);
@@ -195,18 +188,11 @@ export function App() {
       }
     } catch (err: any) {
       console.error('Failed to calculate route:', err);
-      setRouteError(err?.message || 'Could not calculate directions between points.');
+      setRouteError(err?.message || t('couldNotCalculateRoute'));
     } finally {
       setIsLoadingRoute(false);
     }
   };
-
-  // Auto-calculate on initial load
-  useEffect(() => {
-    if (token && origin && destination && !route) {
-      handleCalculateRoute();
-    }
-  }, [token]);
 
   // Start Real Journey
   const handleStartJourney = () => {

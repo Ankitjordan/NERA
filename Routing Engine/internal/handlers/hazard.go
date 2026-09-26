@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"routing-engine/internal/localization"
 	"routing-engine/internal/models"
 	"routing-engine/internal/services/hazard"
 )
@@ -25,6 +26,7 @@ func HazardHandler(svc *hazard.Service) http.HandlerFunc {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		w.Header().Set("Content-Language", localization.FromRequest(r))
 
 		hazards := svc.GetActiveHazards()
 		if hazards == nil {

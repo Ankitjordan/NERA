@@ -115,12 +115,13 @@ export function calculateBearing(startLat: number, startLng: number, destLat: nu
 export async function fetchAutosuggest(
   query: string,
   token: string,
-  locationBias?: { lat: number; lng: number }
+  locationBias?: { lat: number; lng: number },
+  language = 'en',
 ): Promise<PlaceSuggestion[]> {
   const trimmed = query.trim();
   if (!trimmed || trimmed.length < 2) return [];
 
-  const cacheKey = `${trimmed.toLowerCase()}_${locationBias?.lat || ''}_${locationBias?.lng || ''}`;
+  const cacheKey = `${language}_${trimmed.toLowerCase()}_${locationBias?.lat || ''}_${locationBias?.lng || ''}`;
   if (suggestCache.has(cacheKey)) {
     return suggestCache.get(cacheKey)!;
   }
@@ -129,6 +130,7 @@ export async function fetchAutosuggest(
     access_token: token,
     query: trimmed,
     region: 'IND',
+    language,
   });
 
   if (locationBias) {
@@ -185,12 +187,13 @@ export async function fetchAutosuggest(
 // Geocode place name or address to high-precision coordinates
 export async function geocodePlace(
   addressOrName: string,
-  token: string
+  token: string,
+  language = 'en',
 ): Promise<{ lat: number; lng: number; formattedAddress: string } | null> {
   const trimmed = addressOrName.trim();
   if (!trimmed) return null;
 
-  const cacheKey = trimmed.toLowerCase();
+  const cacheKey = `${language}_${trimmed.toLowerCase()}`;
   if (geocodeCache.has(cacheKey)) {
     return geocodeCache.get(cacheKey)!;
   }
@@ -201,6 +204,7 @@ export async function geocodePlace(
       access_token: token,
       address: trimmed,
       itemCount: '1',
+      language,
     });
     let res = await fetch(`/api/mappls-search/search/address/geocode?${params.toString()}`);
     if (!res.ok) {
@@ -269,10 +273,11 @@ export async function fetchRouteDirections(
 export async function fetchSafeRoute(
   origin: { lat: number; lng: number },
   destination: { lat: number; lng: number },
-  profile: 'driving' | 'biking' | 'walking' = 'driving'
+  profile: 'driving' | 'biking' | 'walking' = 'driving',
+  language = 'en',
 ): Promise<any> {
   const waypoints = `${origin.lng},${origin.lat};${destination.lng},${destination.lat}`;
-  const queryParams = new URLSearchParams({ waypoints, profile });
+  const queryParams = new URLSearchParams({ waypoints, profile, language });
   const path = `/api/v1/safe-route?${queryParams.toString()}`;
 
   const res = await fetch(path);
@@ -284,8 +289,8 @@ export async function fetchSafeRoute(
   return data;
 }
 
-export async function fetchActiveHazards(): Promise<any[]> {
-  const res = await fetch('/api/v1/hazards');
+export async function fetchActiveHazards(language = 'en'): Promise<any[]> {
+  const res = await fetch(`/api/v1/hazards?language=${encodeURIComponent(language)}`);
   if (!res.ok) {
     console.error('Failed to fetch hazards');
     return [];
@@ -320,9 +325,9 @@ export interface SystemStatus {
   };
 }
 
-export async function fetchSystemStatus(): Promise<SystemStatus | null> {
+export async function fetchSystemStatus(language = 'en'): Promise<SystemStatus | null> {
   try {
-    const res = await fetch('/api/v1/system/status');
+    const res = await fetch(`/api/v1/system/status?language=${encodeURIComponent(language)}`);
     if (!res.ok) return null;
     return await res.json();
   } catch {

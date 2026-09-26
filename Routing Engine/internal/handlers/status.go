@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"routing-engine/internal/localization"
 	"routing-engine/internal/services/startup"
 )
 
@@ -20,6 +21,7 @@ func StatusHandler(manager *startup.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Language", localization.FromRequest(r))
 
 		state, msg, pct, meta := manager.GetStatus()
 

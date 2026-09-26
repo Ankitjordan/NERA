@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Play, Pause, Square } from 'lucide-react';
 import { formatDistance } from '../services/mapplsRouteService';
+import { useI18n } from '../i18n';
 
 interface MockDriveHUDProps {
   isPaused: boolean;
@@ -31,6 +32,7 @@ export const MockDriveHUD: React.FC<MockDriveHUDProps> = ({
   onStop,
   onSpeedChange,
 }) => {
+  const { t } = useI18n();
   const dialRef = useRef<SVGSVGElement>(null);
   const [isDragging, setIsDragging] = useState(false);
 
@@ -104,29 +106,29 @@ export const MockDriveHUD: React.FC<MockDriveHUDProps> = ({
             </div>
             <div className="hud-stat-item">
               <span className="hud-stat-val">{formatDistance(distanceCoveredM)}</span>
-              <span className="hud-stat-unit">covered</span>
+              <span className="hud-stat-unit">{t('covered')}</span>
             </div>
             <div className="hud-stat-item">
               <span className="hud-stat-val">{formatDistance(totalDistanceM - distanceCoveredM)}</span>
-              <span className="hud-stat-unit">left</span>
+              <span className="hud-stat-unit">{t('left')}</span>
             </div>
             <div className="hud-stat-item">
               <span className="hud-stat-val">{currentBearing}°</span>
-              <span className="hud-stat-unit">heading</span>
+              <span className="hud-stat-unit">{t('heading')}</span>
             </div>
           </div>
 
           <div className="hud-actions">
             {isPaused ? (
-              <button className="hud-action-btn" onClick={onResume} title="Resume">
+              <button className="hud-action-btn" onClick={onResume} title={t('resume')}>
                 <Play size={16} fill="currentColor" />
               </button>
             ) : (
-              <button className="hud-action-btn" onClick={onPause} title="Pause">
+              <button className="hud-action-btn" onClick={onPause} title={t('pause')}>
                 <Pause size={16} fill="currentColor" />
               </button>
             )}
-            <button className="hud-action-btn stop" onClick={onStop} title="Exit Mock Test">
+            <button className="hud-action-btn stop" onClick={onStop} title={t('exitMockTest')}>
               <Square size={16} fill="currentColor" />
             </button>
           </div>
@@ -241,7 +243,7 @@ export const MockDriveHUD: React.FC<MockDriveHUDProps> = ({
               <circle cx="0" cy="0" r="7" fill="#ffffff" filter="url(#dial-glow)" />
             </g>
           </svg>
-          <div className="speed-dial-title">Cruising Speed</div>
+          <div className="speed-dial-title">{t('cruisingSpeed')}</div>
         </div>
       </motion.div>
     </>
